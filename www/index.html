@@ -1,0 +1,315 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MeatNet Display</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.4 system-ui,sans-serif;background:#14161a;color:#e8eaed}
+.wrap{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:.2em 0}
+h2{font-size:14px;text-transform:uppercase;letter-spacing:.05em;color:#9aa0a6;margin:1.4em 0 .5em;border-bottom:1px solid #2a2e35;padding-bottom:4px}
+.card{background:#1c1f25;border:1px solid #2a2e35;border-radius:10px;padding:14px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
+.grid b{color:#9aa0a6;font-weight:400}
+label{display:block;margin:.6em 0 .2em;color:#c8ccd2;font-size:13px}
+input[type=text],input[type=password],input[type=number],select{width:100%;padding:8px;border-radius:7px;border:1px solid #333a44;background:#0f1114;color:#e8eaed;font-size:15px}
+.row{display:flex;gap:8px;align-items:center}
+.chk{display:flex;align-items:center;gap:8px;margin:.5em 0}
+.chk label{margin:0}
+button{background:#2b6cff;color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer;margin-top:10px}
+button.sec{background:#333a44}button.warn{background:#a33}button.sm{padding:5px 9px;margin:0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{padding:5px 4px;border-bottom:1px solid #2a2e35;text-align:left;vertical-align:top}
+th{color:#9aa0a6;font-weight:400}
+small{color:#9aa0a6}.err{color:#e06666}.ok{color:#5fd873}
+.ut{color:#9aa0a6;text-decoration:none;padding:2px 9px;border-radius:6px;border:1px solid #333a44;font-size:13px}
+.ut.active{background:#2b6cff;color:#fff;border-color:#2b6cff}
+.rd{display:grid;grid-template-columns:2fr 1.2fr 1.3fr auto auto auto;gap:6px;margin-top:6px}
+</style></head><body><div class="wrap">
+<h1>MeatNet Display <small id="serial"></small></h1>
+<small id="conn">connecting</small>
+
+<h2>Status</h2>
+<div class="card"><div class="grid">
+<b>Power</b><span><span id="pwr">--</span> <button type="button" class="sec sm" id="pwrbtn" onclick="togglePower()">Standby</button></span>
+<b>Battery</b><span id="bat">--</span>
+<b>WiFi</b><span id="wifi">--</span>
+<b id="splitlbl" style="display:none">Two-unit</b><span id="split" style="display:none">--</span>
+<b id="heardlbl" style="display:none">Heard</b><span id="heard" style="display:none">--</span>
+<b>Phones / nodes connected</b><span id="inb">--</span>
+<b>Outbound links</b><span id="lnk">--</span>
+<b>Routed / sent</b><span id="stats">--</span>
+<b>Relayed for the app</b><span id="via">--</span>
+<b>Display driver</b><span id="disp">--</span>
+<b>Free heap</b><span id="heap">--</span>
+<b>Uptime</b><span id="up">--</span>
+</div></div>
+
+<h2 class="nofield">Probes</h2>
+<div class="card nofield">
+<small>Tick <b>Relay</b> to hold a connection to a probe: the app then gets its full status (predictions, alarms, history) and can send it commands through this device. Every probe heard is also re-advertised (live temperatures only). <span id="budget"></span></small>
+<table><thead><tr><th>Probe</th><th>Core / Surf / Amb</th><th>Source</th><th>Relay</th></tr></thead><tbody id="probes"></tbody></table>
+</div>
+
+<h2 class="nofield">MEATER bridge</h2>
+<div class="card nofield">
+<div class="chk"><input type="checkbox" id="mbr" onchange="setCfg({meater_bridge:this.checked})"><label for="mbr">Bridge MEATER Pro probes to MeatNet</label></div>
+<div class="chk"><input type="checkbox" id="mdir" onchange="setCfg({meater_direct_adverts:this.checked})"><label for="mdir">Also advertise as a direct probe (non-connectable), so the Combustion app can discover it</label></div>
+<small>Tick a MEATER to connect to it and publish it as a Combustion probe (ambient &rarr; T8 ambient, the 5 tips spread across T1&ndash;T7, core = lowest of T1&ndash;T6). Each bridged MEATER uses a relay slot, and the MEATER app can't connect to it at the same time. While bridging, scanning is active so MEATERs can be found.</small>
+<table><thead><tr><th>MEATER</th><th>Tips / ambient</th><th>Probe #</th><th>Bridge</th></tr></thead><tbody id="meaters"></tbody></table>
+</div>
+
+<h2 class="nofield">Other devices</h2>
+<div class="card nofield">
+<table><thead><tr><th>Device</th><th>Reading</th><th>RSSI</th><th>Upstream</th></tr></thead><tbody id="devices"></tbody></table>
+<small>An <b>upstream</b> node link (experimental) relays that node's probes and Gauge/Engine data to the app.</small>
+</div>
+
+<h2 class="nofield">Display</h2>
+<div class="card nofield">
+<div class="row"><span>Units</span>
+<a href="#" id="uc" class="ut" onclick="setCfg({unit:'c'});return false">&deg;C</a>
+<a href="#" id="uf" class="ut" onclick="setCfg({unit:'f'});return false">&deg;F</a></div>
+<label>Layout</label>
+<div class="chk"><input type="radio" name="layout" id="lr" onchange="setCfg({layout:'rotate'})"><label for="lr">Rotate: one big reading per page</label></div>
+<div class="chk"><input type="radio" name="layout" id="lq" onchange="setCfg({layout:'quad'})"><label for="lq">Quad: up to 4 readings per page</label></div>
+<div class="row"><div style="flex:1"><label>Seconds per page</label><input type="number" id="rot" min="2" max="120" onchange="setCfg({rotate_s:+this.value})"></div>
+<div style="flex:1"><label>Brightness %</label><input type="number" id="bri" min="5" max="100" onchange="setCfg({brightness:+this.value})"></div></div>
+<div class="chk"><input type="checkbox" id="stp" onchange="setCfg({status_page:this.checked})"><label for="stp">Show a status page (IP, connections)</label></div>
+<label>Readings <small>(empty = core temperature of every probe heard)</small></label>
+<div id="rds"></div>
+<button type="button" class="sec" onclick="addRd()">Add reading</button>
+<button type="button" onclick="saveRds()">Save readings</button> <small id="rdmsg"></small>
+</div>
+
+<h2>WiFi</h2>
+<div class="card">
+<label>Network</label>
+<div class="row"><select id="ssidsel" onchange="ssid.value=this.value"><option value="">(scan to list networks)</option></select>
+<button type="button" class="sec sm" onclick="scan()">Scan</button></div>
+<label>SSID</label><input type="text" id="ssid">
+<label>Password <small id="pwhint"></small></label><input type="password" id="pw" placeholder="leave blank to keep the saved password">
+<div class="chk"><input type="checkbox" id="openn"><label for="openn">Open network (no password)</label></div>
+<button type="button" onclick="saveWifi()">Save &amp; reboot</button> <small id="wmsg"></small>
+</div>
+
+<h2>Advanced <small>(* = applied after reboot)</small></h2>
+<div class="card">
+<label>Re-advertise probes heard</label>
+<select id="rep" onchange="setCfg({repeat_adverts:this.value})"><option value="all">All probes</option><option value="linked">Only relayed probes</option><option value="off">Off</option></select>
+<div class="chk"><input type="checkbox" id="upush" onchange="setCfg({upstream_push:this.checked})"><label for="upush">Also push status, heartbeats and syncs to the upstream node (off: a Gauge drops nodes that write to it unprompted)</label></div>
+<div class="chk"><input type="checkbox" id="peer" onchange="setCfg({meatnet_peer:this.checked})"><label for="peer">MeatNet node messages (heartbeats, link tables, connect notices)</label></div>
+<div class="row"><div style="flex:1"><label>Connections kept for phones</label><input type="number" id="res" min="0" max="4" onchange="setCfg({inbound_reserve:+this.value})"></div>
+<div style="flex:1"><label>BLE connection limit *</label><input type="number" id="maxc" min="1" max="9" onchange="setCfg({max_conn:+this.value})"></div></div>
+<label>Auto standby after N minutes with no probe heard <small>(0 = off; wakes when a probe leaves its charger)</small></label>
+<input type="number" id="asb" min="0" max="1440" onchange="setCfg({auto_standby_min:+this.value})">
+<div class="row"><div style="flex:1"><label>Battery ADC pin * <small>(-1 = none)</small></label><input type="number" id="batpin" onchange="setCfg({battery_pin:+this.value})"></div>
+<div style="flex:1"><label>Battery divider ratio</label><input type="number" id="batdiv" step="0.01" onchange="setCfg({battery_divider:+this.value})"></div></div>
+<label>Role * <small>(two-unit setup: "app" near the phone, "field" near the devices)</small></label>
+<select id="role" onchange="setCfg({role:this.value})"><option value="standalone">Standalone (one board does everything)</option><option value="app">App unit (phone side)</option><option value="field">Field unit (device side)</option></select>
+<div class="row"><div style="flex:2"><label>App unit address * <small>(field unit; blank = find automatically)</small></label><input type="text" id="speer" onchange="setCfg({split_peer:this.value.trim()})"></div>
+<div style="flex:1"><label>Port *</label><input type="number" id="sport" onchange="setCfg({split_port:+this.value})"></div></div>
+<label>Shared key * <small id="skeyhint">(same on both units)</small></label><input type="password" id="skey" placeholder="leave blank to keep" onchange="setCfg({split_key:this.value})">
+<div class="chk"><input type="checkbox" id="scr" onchange="setCfg({screen:this.checked})"><label for="scr">Use this unit's screen *</label></div>
+<label>Scan duty while links are up, % * <small>(lower = more radio time for far links; 5&ndash;50)</small></label>
+<input type="number" id="sduty" min="5" max="50" onchange="setCfg({linked_scan_duty:+this.value})">
+<label>mDNS hostname *</label><input type="text" id="host" onchange="setCfg({hostname:this.value})">
+<label>Serial (10 chars, blank = from MAC) *</label><input type="text" id="ser" maxlength="10" onchange="setCfg({serial:this.value})">
+<label>DIS model string *</label><input type="text" id="model" onchange="setCfg({dis_model:this.value})">
+<label>DIS firmware version <small>(reported to the app; reconnect the app to see a change)</small></label><input type="text" id="fwv" onchange="setCfg({dis_firmware:this.value.trim()})">
+<label>Setup AP password (8+ chars, blank = open) *</label><input type="password" id="appw" onchange="setCfg({ap_password:this.value})">
+<label>Display pins * <small>sck, mosi, dc, cs, rst, bl, rotation</small></label>
+<input type="text" id="pins" onchange="savePins(this.value)">
+<button type="button" class="warn" onclick="if(confirm('Reboot now?'))post('/api/reboot',{})">Reboot</button> <small id="amsg"></small>
+</div>
+
+<h2>Live log</h2>
+<div class="card"><pre id="log" style="max-height:240px;overflow:auto;margin:0;font-size:12px;line-height:1.35;white-space:pre-wrap"></pre></div>
+
+<script>
+var cfg={},S=null,DEG=String.fromCharCode(176);
+var PF=[['core','Core'],['surface','Surface'],['ambient','Ambient'],['instant','Instant read'],['eta','Time left'],['t1','T1'],['t2','T2'],['t3','T3'],['t4','T4'],['t5','T5'],['t6','T6'],['t7','T7'],['t8','T8']];
+var NF={3:[['temp','Temperature']],6:[['setpoint','Set point']]};
+function $(i){return document.getElementById(i);}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
+function T(c){if(c==null)return '--';var v=cfg.unit=='f'?c*9/5+32:c;return v.toFixed(1)+DEG;}
+function post(u,o){return fetch(u,{method:'POST',body:JSON.stringify(o)}).then(function(r){return r.json();});}
+function setCfg(o,msgEl){
+  for(var k in o)cfg[k]=o[k];
+  return post('/api/config',o).then(function(j){
+    var m=$(msgEl||'amsg');if(m){m.className=j.ok?'ok':'err';m.textContent=j.ok?(j.reboot?'saved, reboot to apply':'saved'):j.error;}
+    renderCfg();if(S)upd(S);});
+}
+function renderCfg(){
+  $('uc').className='ut'+(cfg.unit!='f'?' active':'');$('uf').className='ut'+(cfg.unit=='f'?' active':'');
+  $('lr').checked=cfg.layout!='quad';$('lq').checked=cfg.layout=='quad';
+  $('rot').value=cfg.rotate_s;$('bri').value=cfg.brightness;$('stp').checked=!!cfg.status_page;
+  $('mbr').checked=!!cfg.meater_bridge;$('mdir').checked=cfg.meater_direct_adverts!==false;
+  $('rep').value=cfg.repeat_adverts;$('peer').checked=!!cfg.meatnet_peer;$('upush').checked=!!cfg.upstream_push;
+  $('res').value=cfg.inbound_reserve;$('maxc').value=cfg.max_conn;
+  $('asb').value=cfg.auto_standby_min||0;$('batpin').value=cfg.battery_pin;$('batdiv').value=cfg.battery_divider;
+  $('sduty').value=cfg.linked_scan_duty||20;$('scr').checked=cfg.screen!==false;$('role').value=cfg.role||'standalone';$('speer').value=cfg.split_peer||'';$('sport').value=cfg.split_port||7389;
+  $('skeyhint').textContent=cfg.split_key_set?'(a key is set; same on both units)':'(same on both units; none set)';
+  $('host').value=cfg.hostname||'';$('ser').value=cfg.serial||'';$('model').value=cfg.dis_model||'';$('fwv').value=cfg.dis_firmware||'';
+  var p=cfg.pins||{};$('pins').value=[p.sck,p.mosi,p.dc,p.cs,p.rst,p.bl,p.rotation].join(', ');
+  if(document.activeElement!=$('ssid'))$('ssid').value=cfg.wifi_ssid||'';
+  $('pwhint').textContent=cfg.wifi_password_set?'(a password is saved)':'';
+}
+function savePins(v){
+  var a=v.split(',').map(function(x){return parseInt(x,10);});
+  if(a.length!=7||a.some(isNaN)){$('amsg').className='err';$('amsg').textContent='need 7 numbers';return;}
+  var k=['sck','mosi','dc','cs','rst','bl','rotation'],o={};k.forEach(function(n,i){o[n]=a[i];});
+  setCfg({pins:o});
+}
+function toggleLink(serial,on){
+  var l=(cfg.linked_probes||[]).filter(function(s){return s!=serial;});
+  if(on)l.push(serial);setCfg({linked_probes:l});
+}
+function setUpstream(serial,on){setCfg({upstream_node:on?serial:''});}
+function meaterCfg(addr,on,id){
+  var l=(cfg.meater_probes||[]).filter(function(e){return e.addr!=addr;});
+  if(on)l.push({addr:addr,id:id||8});
+  setCfg({meater_probes:l});
+}
+function meaterId(addr,id){
+  var l=(cfg.meater_probes||[]).map(function(e){return e.addr==addr?{addr:addr,id:id}:e;});
+  setCfg({meater_probes:l});
+}
+function updMeaters(s,nl){
+  var h='',ms=s.meaters||[];
+  if(!s.meater_bridge){$('meaters').innerHTML='<tr><td colspan="4"><small>Bridge is off.</small></td></tr>';return;}
+  ms.forEach(function(m){
+    var dis=!m.bridged&&nl>=s.budget?' disabled':'';
+    var ids='';for(var i=1;i<=8;i++)ids+='<option'+(i==m.id?' selected':'')+'>'+i+'</option>';
+    var t=m.tips?m.tips.map(function(c){return T(c).replace(DEG,'');}).join(' ')+' / '+T(m.ambient):'--';
+    h+='<tr><td>'+esc(m.name)+' '+esc(m.addr)+'<br><small>as probe '+esc(m.serial)+(m.rssi!=null?', '+m.rssi+'dBm':'')+(m.state?', link '+esc(m.state):'')+(m.battery!=null?', batt '+m.battery+'%':'')+'</small></td><td>'+t+'</td>'+
+      '<td><select onchange="meaterId(\''+m.addr+'\',+this.value)"'+(m.bridged?'':' disabled')+'>'+ids+'</select></td>'+
+      '<td><input type="checkbox"'+(m.bridged?' checked':'')+dis+' onchange="meaterCfg(\''+m.addr+'\',this.checked,8)"></td></tr>';
+  });
+  $('meaters').innerHTML=h||'<tr><td colspan="4"><small>No MEATER heard yet (take it out of its charger; make sure the MEATER app isn\'t connected to it).</small></td></tr>';
+}
+function togglePower(){
+  var on=!(S&&S.power&&S.power.standby);
+  if(on&&!confirm('Enter standby? Relaying stops and the screen turns off; this page keeps working.'))return;
+  post('/api/power',{standby:on}).then(function(j){if(S&&j.power){S.power=j.power;upd(S);}});
+}
+function updSplit(s){
+  var sp=s.split,field=s.role=='field',show=!!sp;
+  ['splitlbl','split'].forEach(function(i){$(i).style.display=show?'':'none';});
+  ['heardlbl','heard'].forEach(function(i){$(i).style.display=field?'':'none';});
+  var nf=document.querySelectorAll('.nofield');
+  for(var i=0;i<nf.length;i++)nf[i].style.display=field?'none':'';
+  if(sp)$('split').textContent=(field?'app unit ':'field unit ')+(sp.connected?(esc(sp.peer)+' at '+sp.ip+(sp.rtt_ms!=null?' ('+sp.rtt_ms+' ms)':'')):'offline');
+  if(field){
+    var h=[];(s.probes||[]).forEach(function(p){h.push('probe '+p.serial+' '+p.rssi+'dBm');});
+    (s.devices||[]).forEach(function(d){h.push(d.name+' '+d.serial+' '+d.rssi+'dBm');});
+    (s.meaters||[]).forEach(function(m){h.push(m.name+' '+m.addr+' '+m.rssi+'dBm');});
+    $('heard').innerHTML=h.length?h.map(esc).join('<br>'):'nothing yet';
+  }
+}
+function upd(s){
+  S=s;$('serial').textContent=s.serial;updSplit(s);
+  var pw=s.power;
+  if(pw){
+    $('pwr').textContent=pw.standby?('standby ('+(pw.reason=='auto'?'auto, wakes when a probe is heard':'manual')+', '+Math.floor(pw.since_s/60)+' min)'):'on'+(pw.auto_standby_min?' (auto standby after '+pw.auto_standby_min+' min idle)':'');
+    $('pwrbtn').textContent=pw.standby?'Wake':'Standby';
+    var b=pw.battery;$('bat').textContent=b&&b.present?(b.v.toFixed(2)+' V, about '+b.pct+'%'):'not detected';
+  }else{$('pwr').textContent='--';$('pwrbtn').style.display='none';}
+  var w=s.wifi;$('wifi').textContent=w.mode=='ap'?('setup AP '+w.ap_ssid+' at '+w.ip):(w.mode=='sta'?(w.ssid+' - '+w.ip):w.mode);
+  $('inb').textContent=s.inbound+' of '+s.max_conn+' BLE connections';
+  $('lnk').textContent=s.links.length?s.links.map(function(l){return l.kind+' '+l.serial+': '+l.state;}).join(', '):'none';
+  $('stats').textContent=s.stats.routed+' commands routed, '+s.stats.status_sent+' status updates sent'+(s.tx_dropped?', '+s.tx_dropped+' notifications dropped':'')+(s.pending?', '+s.pending+' pending':'');
+  $('disp').textContent=s.display||'--';
+  var v=s.via||{},fmt=function(d){var k=Object.keys(d||{}).sort();return k.length?k.map(function(x){return x+' &times;'+d[x];}).join(', '):'none';};
+  $('via').innerHTML='app &rarr; nodes: '+fmt(v.app_to_node)+'<br>nodes &rarr; app: '+fmt(v.node_to_app)+'<br><small>0x60 gauge status, 0x61 gauge alarm, 0x62 gauge logs, 0x70 Engine status, 0x71 Engine set point</small>';
+  $('heap').textContent=(s.heap/1024|0)+' KB';$('up').textContent=Math.floor(s.uptime/3600)+'h '+Math.floor(s.uptime%3600/60)+'m';
+  var nl=(cfg.linked_probes||[]).length+(cfg.meater_bridge?(cfg.meater_probes||[]).length:0);
+  $('budget').textContent='Relay slots (probes + MEATERs): '+nl+' of '+s.budget+' used.';
+  updMeaters(s,nl);
+  var h='',lp=cfg.linked_probes||[];
+  s.probes.forEach(function(p){
+    var on=lp.indexOf(p.serial)>=0,dis=!on&&(nl>=s.budget)?' disabled':'';
+    var lk=s.links.filter(function(l){return l.serial==p.serial;})[0];
+    var mode=p.mode==1?'instant '+T(p.instant_c):(p.mode==3?'error':T(p.core_c)+' / '+T(p.surface_c)+' / '+T(p.ambient_c));
+    var pr=p.prediction&&p.prediction.state==3?'<br><small>ready in '+Math.round(p.prediction.seconds/60)+' min</small>':'';
+    h+='<tr><td>#'+p.id+' '+esc(p.serial)+(p.low_battery?' <span class="err">low batt</span>':'')+(p.alarming?' <span class="err">ALARM</span>':'')+'</td><td>'+mode+pr+'</td><td>'+esc(p.src)+(p.hops?' ('+p.hops+' hop)':'')+(p.rssi!=null?' '+p.rssi+'dBm':'')+'<br><small>'+p.age_s+'s ago'+(lk?', link '+esc(lk.state):'')+'</small></td>'+
+      '<td><input type="checkbox"'+(on?' checked':'')+dis+(p.direct||on?'':' disabled title="not heard directly"')+' onchange="toggleLink(\''+p.serial+'\',this.checked)"></td></tr>';
+  });
+  lp.forEach(function(sr){if(!s.probes.some(function(p){return p.serial==sr;}))h+='<tr><td>'+esc(sr)+'</td><td>--</td><td>not heard</td><td><input type="checkbox" checked onchange="toggleLink(\''+sr+'\',this.checked)"></td></tr>';});
+  $('probes').innerHTML=h||'<tr><td colspan="4"><small>No probes heard yet.</small></td></tr>';
+  h='';
+  s.devices.forEach(function(d){
+    var r=d.temp_c!=null?T(d.temp_c):(d.setpoint_c!=null?'set '+T(d.setpoint_c):'');
+    h+='<tr><td>'+esc(d.name)+' '+esc(d.serial)+'</td><td>'+r+'</td><td>'+d.rssi+'dBm, '+d.age_s+'s</td><td><input type="checkbox"'+(cfg.upstream_node==d.serial?' checked':'')+' onchange="setUpstream(\''+d.serial+'\',this.checked)"></td></tr>';
+  });
+  $('devices').innerHTML=h||'<tr><td colspan="4"><small>No other MeatNet devices heard.</small></td></tr>';
+}
+// ---- readings editor ----
+function devOptions(sel){
+  var o=[],seen={};
+  if(S){S.probes.forEach(function(p){o.push(['probe:'+p.serial,'Probe #'+p.id+' '+p.serial,1]);});
+    S.devices.forEach(function(d){if(NF[d.ptype])o.push(['node:'+d.serial,d.name+' '+d.serial,d.ptype]);});}
+  o.forEach(function(x){seen[x[0]]=1;});
+  if(sel&&!seen[sel])o.push([sel,sel+' (not heard)',sel.indexOf('probe:')==0?1:0]);
+  return o;
+}
+function kindOf(dev){
+  if(dev.indexOf('probe:')==0)return 1;
+  var d=S&&S.devices.filter(function(x){return 'node:'+x.serial==dev;})[0];return d?d.ptype:0;
+}
+function fieldOpts(dev,sel){
+  var k=kindOf(dev),f=k==1?PF:(NF[k]||NF[3].concat(NF[6]));
+  return f.map(function(x){return '<option value="'+x[0]+'"'+(x[0]==sel?' selected':'')+'>'+x[1]+'</option>';}).join('');
+}
+function rdRow(r){
+  var d=document.createElement('div');d.className='rd';
+  var opts=devOptions(r.dev).map(function(x){return '<option value="'+esc(x[0])+'"'+(x[0]==r.dev?' selected':'')+'>'+esc(x[1])+'</option>';}).join('');
+  d.innerHTML='<select class="dv">'+opts+'</select><select class="fd">'+fieldOpts(r.dev||'',r.field)+'</select>'+
+    '<input type="text" class="lb" placeholder="label (auto)" maxlength="16" value="'+esc(r.label||'')+'">'+
+    '<button type="button" class="sec sm">&uarr;</button><button type="button" class="sec sm">&darr;</button><button type="button" class="sec sm">x</button>';
+  var b=d.querySelectorAll('button');
+  b[0].onclick=function(){if(d.previousSibling)d.parentNode.insertBefore(d,d.previousSibling);};
+  b[1].onclick=function(){if(d.nextSibling)d.parentNode.insertBefore(d.nextSibling,d);};
+  b[2].onclick=function(){d.remove();};
+  d.querySelector('.dv').onchange=function(){d.querySelector('.fd').innerHTML=fieldOpts(this.value,'');};
+  if(!r.dev){var dv=d.querySelector('.dv');d.querySelector('.fd').innerHTML=fieldOpts(dv.value,'core');}
+  return d;
+}
+function renderRds(){var b=$('rds');b.innerHTML='';(cfg.readings||[]).forEach(function(r){b.appendChild(rdRow(r));});}
+function addRd(){$('rds').appendChild(rdRow({dev:'',field:'core',label:''}));}
+function saveRds(){
+  var out=[],rows=$('rds').querySelectorAll('.rd');
+  for(var i=0;i<rows.length;i++){var r=rows[i],dv=r.querySelector('.dv').value;if(!dv)continue;
+    out.push({dev:dv,field:r.querySelector('.fd').value,label:r.querySelector('.lb').value.trim()});}
+  setCfg({readings:out},'rdmsg');
+}
+// ---- wifi ----
+function scan(){
+  $('wmsg').textContent='scanning...';
+  fetch('/api/wifi/scan').then(function(r){return r.json();}).then(function(j){
+    $('wmsg').textContent='';
+    $('ssidsel').innerHTML='<option value="">(choose)</option>'+j.networks.map(function(n){return '<option value="'+esc(n.ssid)+'">'+esc(n.ssid)+' ('+n.rssi+'dBm'+(n.secure?'':', open')+')</option>';}).join('');
+  }).catch(function(){$('wmsg').textContent='scan failed';});
+}
+function saveWifi(){
+  var o={ssid:$('ssid').value.trim()};
+  if($('openn').checked)o.password='';else if($('pw').value)o.password=$('pw').value;
+  post('/api/wifi',o).then(function(j){$('wmsg').className=j.ok?'ok':'err';$('wmsg').textContent=j.ok?'saved, rebooting... reconnect to your network':j.error;});
+}
+// ---- live updates ----
+function addlog(line){var el=$('log'),NL=String.fromCharCode(10);var l=el.textContent?el.textContent.split(NL):[];l.push(line);el.textContent=l.slice(-200).join(NL);el.scrollTop=el.scrollHeight;}
+var wsok=false;
+function connectWS(){
+  try{var ws=new WebSocket('ws://'+location.host+'/ws');
+    ws.onopen=function(){wsok=true;$('conn').textContent='live';};
+    ws.onmessage=function(ev){var m=JSON.parse(ev.data);if(m.t=='status')upd(m.d);else if(m.t=='log')addlog(m.d);};
+    ws.onclose=function(){wsok=false;$('conn').textContent='reconnecting';setTimeout(connectWS,2000);};
+    ws.onerror=function(){try{ws.close();}catch(e){}};
+  }catch(e){setTimeout(connectWS,3000);}
+}
+setInterval(function(){if(!wsok)fetch('/api/state').then(function(r){return r.json();}).then(upd).catch(function(){});},3000);
+fetch('/api/config').then(function(r){return r.json();}).then(function(c){cfg=c;renderCfg();
+  fetch('/api/state').then(function(r){return r.json();}).then(function(s){upd(s);renderRds();});});
+connectWS();
+</script>
+</div></body></html>

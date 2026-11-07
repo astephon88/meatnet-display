@@ -1,0 +1,10 @@
+{
+  "wifi_ssid": "your-2.4GHz-ssid",
+  "wifi_password": "your-wifi-password",
+  "hostname": "meatnet",
+  "unit": "f",
+  "layout": "rotate",
+  "rotate_s": 5,
+  "readings": [],
+  "linked_probes": []
+}

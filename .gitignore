@@ -1,0 +1,5 @@
+config.json
+links.json
+__pycache__/
+.pytest_cache/
+host/*.json
