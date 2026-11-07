@@ -1,0 +1,23 @@
+# --- Bluetooth: NimBLE host, central + observer only (the field unit never
+# advertises), room for several outbound links.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=6
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
+
+# --- WiFi + Bluetooth share the radio: software coexistence on.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# --- App size: WiFi + NimBLE need more than the default 1 MB app slot.
+# 4 MB layout so the same build fits plain ESP32 boards too.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# --- C++
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

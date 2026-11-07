@@ -1,0 +1,13 @@
+menu "MeatNet field unit"
+
+    config MEATNET_WIFI_SSID
+        string "WiFi SSID (bootstrap)"
+        default ""
+        help
+            Network to join until settings are stored in NVS (milestone 5).
+
+    config MEATNET_WIFI_PASSWORD
+        string "WiFi password (bootstrap)"
+        default ""
+
+endmenu

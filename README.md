@@ -234,6 +234,49 @@ python3 -m host.run field --key <shared key> [--peer <ip>]   # web UI on :8081
   and editable in each unit's web UI. "Reboot" in the web UI restarts the
   process.
 
+### C++ field unit (ESP-IDF, in progress)
+
+`field-idf/` is a C++ port of the field unit on ESP-IDF + NimBLE. It speaks
+the same WiFi protocol, so it pairs with the existing app unit (ESP32 or
+Linux host). It exists mainly to get control the MicroPython unit lacks:
+disconnect reasons, connection parameters, and WiFi/Bluetooth coexistence.
+The plan and milestones are in `docs/field-unit-idf-plan.md`.
+
+Milestone status: 1 (skeleton: boots, joins WiFi, scans) is done; 2 (WiFi
+session + scan streaming) is in progress.
+
+Build (ESP-IDF v5.5 installed in `~/esp/esp-idf`):
+
+```
+cd field-idf
+. ~/esp/esp-idf/export.sh
+idf.py set-target esp32s3        # once; use esp32 for plain ESP32 boards
+idf.py menuconfig                # "MeatNet field unit": bootstrap WiFi etc.
+idf.py build
+```
+
+Bootstrap settings (WiFi, app unit address, shared key) live in the
+git-ignored `sdkconfig` until the setup page arrives (milestone 5).
+
+**Flashing the Waveshare ESP32-S3-LCD-1.28.** The board's USB-serial chip
+(CH343) resets the ESP32 whenever the serial port is opened, but it can't
+select download mode, and esptool's automatic reset doesn't enter it. So the
+order matters:
+
+1. Start the flash first, with esptool set to keep retrying the connection:
+   `python -m esptool --chip esp32s3 -p /dev/serial/by-id/<CH343 device>
+   --connect-attempts 0 write_flash @flash_args` (from `field-idf/build`).
+2. **Then** hold BOOT, press and release RESET, release BOOT. esptool
+   connects and writes.
+3. Afterwards, press RESET to run the new firmware. If it keeps landing in
+   download mode (`boot:0x31 (DOWNLOAD…)` on the serial port, e.g. after
+   MicroPython's `machine.bootloader()`), unplug the board for a few
+   seconds.
+
+Opening the serial port to read logs also restarts the board. Use the
+`/dev/serial/by-id/…` path, since `/dev/ttyACM*` numbering changes on
+replug.
+
 ## Standby and battery
 
 **Standby** (Status → *Standby* in the web UI) idles the device while keeping
@@ -295,6 +338,7 @@ charging.
 | `linktable.py` | Link/unlink tables persisted in `links.json` |
 | `readings.py` | Configured readings → display items (formatting, pages) |
 | `meater.py` | MEATER Pro decoding, sensor mapping and synthesized Combustion probe adverts |
+| `field-idf/` | C++ field unit on ESP-IDF + NimBLE (in progress); see `docs/field-unit-idf-plan.md` |
 | `host/` | Linux host versions of the app unit (BlueZ D-Bus peripheral) and field unit (bleak), sharing all protocol/node code; `python3 -m host.run app|field` |
 | `split.py` | Two-unit mode: field-side radio server, app-side remote radio and transport, WiFi protocol (TCP + UDP beacon) |
 | `power.py` | Standby (manual/auto), CPU/WiFi power save, battery voltage via ADC |
