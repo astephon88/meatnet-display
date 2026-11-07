@@ -10,4 +10,16 @@ menu "MeatNet field unit"
         string "WiFi password (bootstrap)"
         default ""
 
+    config MEATNET_SPLIT_PEER
+        string "App unit host/IP (blank = find it by its UDP beacon)"
+        default ""
+
+    config MEATNET_SPLIT_KEY
+        string "Shared key (same as on the app unit)"
+        default ""
+
+    config MEATNET_SPLIT_PORT
+        int "App unit TCP/UDP port"
+        default 7389
+
 endmenu
