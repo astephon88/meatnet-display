@@ -242,8 +242,11 @@ Linux host). It exists mainly to get control the MicroPython unit lacks:
 disconnect reasons, connection parameters, and WiFi/Bluetooth coexistence.
 The plan and milestones are in `docs/field-unit-idf-plan.md`.
 
-Milestone status: 1 (skeleton: boots, joins WiFi, scans) is done; 2 (WiFi
-session + scan streaming) is in progress.
+Milestone status: 1 (skeleton), 2 (WiFi session + scan streaming) and 3
+(links: probes, nodes, MEATERs) are done, so it can replace the MicroPython
+field unit. Every link drop is reported with its Bluetooth disconnect reason,
+e.g. `error: supervision timeout (signal lost) (0x08)`, which also shows in
+the app unit's log. Next: 4 (diagnostics and tuning), then 5 (setup page).
 
 Build (ESP-IDF v5.5 installed in `~/esp/esp-idf`):
 

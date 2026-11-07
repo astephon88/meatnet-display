@@ -52,6 +52,14 @@ public:
     void set_scan_active(bool on);
     void set_standby(bool on);
 
+    // Scan pacing, driven by the 10 Hz radio task: duty in percent (50
+    // unlinked, lower while links are up or streaming). Scanning is paused
+    // around each outgoing connect (NimBLE can't connect while scanning)
+    // and resumed by ensure_scan().
+    void set_duty(int percent);
+    void pause_scan();
+    void ensure_scan();
+
     std::string address() const { return address_; }   // our BLE address, display order
     uint32_t adverts() const { return adverts_; }
 
@@ -67,6 +75,8 @@ private:
     std::string ignore_mac_, ignore_serial_;
     std::string address_;
     bool ready_ = false;
+    bool scanning_ = false;
+    int duty_ = 50;
     bool scan_active_ = false;
     bool standby_ = false;
     uint32_t adverts_ = 0;

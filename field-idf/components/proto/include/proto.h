@@ -24,6 +24,10 @@ bool unhex(const std::string &text, std::string &out);
 bool meater_name(const uint8_t *name, size_t len);
 bool meater_service_uuid(const uint8_t uuid_le[16]);
 
+// "6E400003-B5A3-F393-E0A9-E50E24DCCA9E" -> 16 bytes little-endian (as
+// NimBLE's ble_uuid128_t stores them). False on bad input.
+bool uuid128_le(const char *text, uint8_t out[16]);
+
 // BLE addresses: NimBLE stores them least-significant byte first; the
 // MeatNet protocol (and the Python units) use display order (as printed).
 std::string addr_display(const uint8_t val_le[6]);

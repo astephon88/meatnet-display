@@ -3,8 +3,9 @@
 //
 // Wire protocol (see split.py): newline-delimited JSON over TCP; binary as
 // base64, keys/addresses as hex. The app unit is found via a configured peer
-// or its UDP beacon. This milestone streams the scan tables and handles
-// scan_active/standby; links (open/close/write, link/rx) come in milestone 3.
+// or its UDP beacon. Streams the scan tables, holds the links the app unit
+// opens (link state + notifications back, writes forward), and follows its
+// scan-mode/standby commands.
 #pragma once
 
 #include <cstdint>
@@ -41,13 +42,14 @@ private:
     void session(const std::string &host);
     void handle(cJSON *msg, std::vector<std::string> &out);
     std::string scan_message(int64_t now);
+    void link_messages(std::vector<std::string> &out);
 
     Config cfg_;
     bool connected_ = false;
     std::string peer_serial_;
     int rtt_ms_ = -1;
-    bool warned_links_ = false;
     std::map<std::string, int64_t> sent_;   // table+key -> sighting time last sent
+    std::map<std::string, std::string> link_sig_;   // key -> last reported link state
 };
 
 }  // namespace split

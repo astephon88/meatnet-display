@@ -1,8 +1,8 @@
 // MeatNet field unit (ESP-IDF). See ../docs/field-unit-idf-plan.md.
 //
-// Milestone 2: joins WiFi with bootstrap credentials, scans with NimBLE, and
-// streams the scan tables to the app unit over the split protocol. Links
-// (milestone 3) and the settings page (milestone 5) come later.
+// Joins WiFi with bootstrap credentials, scans with NimBLE, holds the links
+// the app unit asks for, and streams everything to the app unit over the
+// split protocol. The settings page (milestone 5) comes later.
 
 #include <cstring>
 #include <string>
@@ -22,6 +22,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 
+#include "links.h"
 #include "proto.h"
 #include "radio.h"
 #include "split_client.h"
@@ -60,6 +61,37 @@ static void ble_start()
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
     nimble_port_freertos_init(host_task);
+}
+
+// -- radio task: links + scan pacing (10 Hz) ----------------------------------------
+
+static constexpr int kLinkedScanDuty = 20;     // % while any link is up
+static constexpr int kBurstScanDuty = 5;       // % while a link streams (log reads)
+static constexpr uint32_t kBurstRate = 20;     // notifications/s = "streaming"
+static constexpr int64_t kBurstHoldMs = 5000;
+
+static void radio_task(void *)
+{
+    radio::Radio &r = radio::Radio::get();
+    radio::Links &links = radio::Links::get();
+    int64_t rate_at = radio::Radio::now_ms(), burst_until = 0;
+    uint32_t rate_count = links.total_rx();
+    while (true) {
+        links.tick();
+        int64_t now = radio::Radio::now_ms();
+        if (now - rate_at >= 1000) {
+            uint32_t total = links.total_rx();
+            if ((total - rate_count) * 1000 / (now - rate_at) > kBurstRate)
+                burst_until = now + kBurstHoldMs;
+            rate_at = now;
+            rate_count = total;
+        }
+        int duty = now < burst_until ? kBurstScanDuty
+                 : links.any_connected() ? kLinkedScanDuty : 50;
+        r.set_duty(duty);
+        if (!links.connecting()) r.ensure_scan();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
 
 // -- WiFi (bootstrap credentials) -------------------------------------------------
@@ -125,6 +157,8 @@ extern "C" void app_main(void)
     bool wifi = wifi_start();
     ble_start();
     xEventGroupWaitBits(g_events, kBleReady, pdFALSE, pdTRUE, portMAX_DELAY);
+    radio::Links::get().max_links = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
+    xTaskCreate(radio_task, "radio", 6144, nullptr, 6, nullptr);
 
     static split::Client *client = nullptr;
     if (wifi) {
@@ -148,9 +182,15 @@ extern "C" void app_main(void)
         r.lock();
         size_t d = r.direct.size(), rep = r.repeated.size(), n = r.nodes.size(), m = r.meaters.size();
         r.unlock();
+        size_t ready = 0, total = 0;
+        for (auto &l : radio::Links::get().collect_states()) {
+            total++;
+            if (l == "ready") ready++;
+        }
         ESP_LOGI(TAG, "heard: %u probes, %u repeated, %u nodes, %u MEATERs (%u adverts); "
-                      "app unit %s%s; free heap %u",
+                      "links %u/%u ready; app unit %s%s; free heap %u",
                  (unsigned)d, (unsigned)rep, (unsigned)n, (unsigned)m, (unsigned)r.adverts(),
+                 (unsigned)ready, (unsigned)total,
                  client && client->connected() ? "connected " : "offline",
                  client && client->connected() ? client->peer().c_str() : "",
                  (unsigned)esp_get_free_heap_size());

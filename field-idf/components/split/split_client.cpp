@@ -9,6 +9,7 @@
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "mbedtls/base64.h"
+#include "links.h"
 #include "proto.h"
 #include "radio.h"
 
@@ -29,6 +30,17 @@ static std::string b64(const std::string &bytes)
     std::string out(4 * ((bytes.size() + 2) / 3) + 1, '\0');
     mbedtls_base64_encode(reinterpret_cast<unsigned char *>(&out[0]), out.size(), &olen,
                           reinterpret_cast<const unsigned char *>(bytes.data()), bytes.size());
+    out.resize(olen);
+    return out;
+}
+
+static std::string unb64(const char *text)
+{
+    size_t len = strlen(text), olen = 0;
+    std::string out(len, '\0');
+    if (mbedtls_base64_decode(reinterpret_cast<unsigned char *>(&out[0]), out.size(), &olen,
+                              reinterpret_cast<const unsigned char *>(text), len) != 0)
+        return std::string();
     out.resize(olen);
     return out;
 }
@@ -214,6 +226,7 @@ void Client::session(const std::string &host)
     cJSON_Delete(reply);
     r.set_ignore(mac_bytes, node_serial(peer_serial_));
     sent_.clear();
+    link_sig_.clear();
     connected_ = true;
     ESP_LOGI(TAG, "connected to app unit %s at %s", peer_serial_.c_str(), host.c_str());
 
@@ -249,6 +262,7 @@ void Client::session(const std::string &host)
             }
             if (buf.size() > 16384) buf.clear();   // runaway garbage
         }
+        link_messages(out);
         now = radio::Radio::now_ms();
         if (now - scan_at >= kScanBatchMs) {
             scan_at = now;
@@ -271,6 +285,8 @@ void Client::session(const std::string &host)
         }
     }
     close(fd);
+    // Without the app unit nobody wants the links: free the devices' slots.
+    radio::Links::get().close_all();
 }
 
 void Client::handle(cJSON *msg, std::vector<std::string> &out)
@@ -293,10 +309,69 @@ void Client::handle(cJSON *msg, std::vector<std::string> &out)
     } else if (strcmp(t, "standby") == 0) {
         r.set_standby(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(msg, "on")));
     } else if (strcmp(t, "open") == 0 || strcmp(t, "close") == 0 || strcmp(t, "write") == 0) {
-        if (!warned_links_) {
-            warned_links_ = true;
-            ESP_LOGW(TAG, "app unit asked for links ('%s'); links arrive in milestone 3", t);
+        const char *k = str_field(msg, "k");
+        std::string key;
+        if (!k || !proto::unhex(k, key)) return;
+        radio::Links &links = radio::Links::get();
+        if (t[0] == 'o') {
+            const char *kind = str_field(msg, "kind");
+            const char *addr = str_field(msg, "addr");
+            cJSON *at = cJSON_GetObjectItemCaseSensitive(msg, "at");
+            std::string addr_bytes;
+            if (kind && addr && proto::unhex(addr, addr_bytes) && addr_bytes.size() == 6)
+                links.open(key, kind, cJSON_IsNumber(at) ? at->valueint : 0, addr_bytes);
+        } else if (t[0] == 'c') {
+            links.close(key);
+        } else {
+            const char *data = str_field(msg, "data");
+            if (data) links.write(key, unb64(data));
         }
+    }
+}
+
+// Link state changes and notifications, as split.FieldRadio.link_messages().
+void Client::link_messages(std::vector<std::string> &out)
+{
+    radio::Links &links = radio::Links::get();
+    for (auto &r : links.collect()) {
+        std::string info_sig;
+        for (auto &kv : r.info) info_sig += kv.first + "=" + kv.second + ";";
+        std::string sig = r.state + "|" + r.desc + "|" + std::to_string(r.mtu) + "|" + info_sig;
+        std::string khex = proto::hex(r.key);
+        if (link_sig_[r.key] != sig) {
+            link_sig_[r.key] = sig;
+            cJSON *m = cJSON_CreateObject();
+            cJSON_AddStringToObject(m, "t", "link");
+            cJSON_AddStringToObject(m, "k", khex.c_str());
+            cJSON_AddStringToObject(m, "kind", r.kind.c_str());
+            cJSON_AddStringToObject(m, "state", r.state.c_str());
+            cJSON_AddStringToObject(m, "desc", r.desc.c_str());
+            cJSON_AddNumberToObject(m, "mtu", r.mtu);
+            cJSON_AddNumberToObject(m, "count", r.count);
+            cJSON *info = cJSON_AddObjectToObject(m, "info");
+            for (auto &kv : r.info) cJSON_AddStringToObject(info, kv.first.c_str(), kv.second.c_str());
+            out.push_back(json_line(m));
+        }
+        for (auto &rx : r.rx) {
+            cJSON *m = cJSON_CreateObject();
+            cJSON_AddStringToObject(m, "t", "rx");
+            cJSON_AddStringToObject(m, "k", khex.c_str());
+            cJSON_AddStringToObject(m, "sub", rx.first.c_str());
+            cJSON_AddStringToObject(m, "data", b64(rx.second).c_str());
+            out.push_back(json_line(m));
+        }
+    }
+    for (auto &key : links.take_removed()) {
+        link_sig_.erase(key);
+        cJSON *m = cJSON_CreateObject();
+        cJSON_AddStringToObject(m, "t", "link");
+        cJSON_AddStringToObject(m, "k", proto::hex(key).c_str());
+        cJSON_AddStringToObject(m, "kind", "");
+        cJSON_AddStringToObject(m, "state", "closed");
+        cJSON_AddStringToObject(m, "desc", "");
+        cJSON_AddNumberToObject(m, "mtu", 23);
+        cJSON_AddNumberToObject(m, "count", 0);
+        out.push_back(json_line(m));
     }
 }
 

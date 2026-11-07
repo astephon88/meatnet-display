@@ -64,6 +64,17 @@ bool meater_service_uuid(const uint8_t uuid_le[16])
     return false;
 }
 
+bool uuid128_le(const char *text, uint8_t out[16])
+{
+    std::string hexs;
+    for (const char *p = text; *p; p++)
+        if (*p != '-') hexs += *p;
+    std::string raw;
+    if (hexs.size() != 32 || !unhex(hexs, raw)) return false;
+    for (int i = 0; i < 16; i++) out[i] = static_cast<uint8_t>(raw[15 - i]);
+    return true;
+}
+
 std::string addr_display(const uint8_t val_le[6])
 {
     std::string s(6, '\0');

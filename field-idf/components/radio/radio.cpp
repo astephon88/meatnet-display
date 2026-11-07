@@ -44,25 +44,44 @@ void Radio::restart_scan()
     }
     struct ble_gap_disc_params p;
     memset(&p, 0, sizeof(p));
-    // Units of 0.625 ms. 50% duty normally (linked/burst duty arrives with
-    // the links in milestone 3); about 3% in standby.
+    // Units of 0.625 ms: a 30 ms window every 30*100/duty ms; about 3% in
+    // standby.
     if (standby_) {
         p.itvl = 2048;              // 1.28 s
         p.window = 64;              // 40 ms
     } else {
-        p.itvl = 96;                // 60 ms
         p.window = 48;              // 30 ms
+        p.itvl = static_cast<uint16_t>(48 * 100 / (duty_ < 5 ? 5 : duty_));
     }
     // Active scanning (scan requests) only when the app unit asks for it:
     // MEATER names/UUIDs may only be in the scan response.
     p.passive = scan_active_ && !standby_ ? 0 : 1;
     p.filter_duplicates = 0;
     int rc = ble_gap_disc(own_addr_type, BLE_HS_FOREVER, &p, gap_event, this);
-    if (rc != 0)
+    scanning_ = rc == 0;
+    if (rc != 0 && rc != BLE_HS_EBUSY)       // EBUSY: a connect is in flight
         ESP_LOGE(TAG, "ble_gap_disc failed: %d", rc);
-    else
-        ESP_LOGI(TAG, "scanning: %s, %s", p.passive ? "passive" : "active",
-                 standby_ ? "standby duty" : "50% duty");
+    else if (rc == 0)
+        ESP_LOGD(TAG, "scanning: %s, %d%% duty", p.passive ? "passive" : "active",
+                 standby_ ? 3 : duty_);
+}
+
+void Radio::set_duty(int percent)
+{
+    if (percent == duty_) return;
+    duty_ = percent;
+    if (scanning_) restart_scan();
+}
+
+void Radio::pause_scan()
+{
+    if (scanning_) ble_gap_disc_cancel();
+    scanning_ = false;
+}
+
+void Radio::ensure_scan()
+{
+    if (!scanning_) restart_scan();
 }
 
 void Radio::set_scan_active(bool on)
@@ -121,8 +140,8 @@ int Radio::gap_event(struct ble_gap_event *event, void *arg)
         self->ingest(event->disc);
         break;
     case BLE_GAP_EVENT_DISC_COMPLETE:
-        // Stopped (e.g. a connect pre-empted it): resume.
-        self->restart_scan();
+        // Stopped: the radio task resumes it (not while a connect is in flight).
+        self->scanning_ = false;
         break;
     default:
         break;
