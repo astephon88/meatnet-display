@@ -259,3 +259,14 @@ def test_field_ignores_the_app_units_own_adverts():
     r.apply({"t": "scan", "n": [[p.encode_serial("APP0000001").hex(),
                                  split.b64(own_display), 0, 0, "01" * 6, -40]]}, 1000)
     assert r.nodes == {}
+
+
+def test_remote_link_keeps_field_unit_stats():
+    r = split.RemoteRadio(lambda *a: None)
+    r.on_connect({"max_conn": 6})
+    link = r.open_link(PROBE, "node", 0, b"\x01" * 6)
+    st = {"connects": 3, "drops": {"supervision timeout (signal lost) (0x08)": 2},
+          "params": "50.0ms/0/8000ms"}
+    r.apply({"t": "link", "k": PROBE.hex(), "state": "ready", "desc": "", "mtu": 177,
+             "stats": st}, 0)
+    assert link.stats == st

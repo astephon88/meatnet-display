@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "sdkconfig.h"
 #include "host/ble_hs.h"
 #include "proto.h"
 #include "radio.h"
@@ -20,11 +21,12 @@ static constexpr int64_t kDropRetryMs = 1000;   // after an unexpected drop
 
 // Connection parameters (units: interval 1.25 ms, timeout 10 ms). The
 // supervision timeout is generous (NimBLE's default is ~2.5 s; phones use
-// 5 s+) so a busy peer doesn't drop the link. Tuned further in milestone 4.
+// 5 s+) so a moment of radio contention doesn't drop the link, and it is
+// kept as a floor if the peer asks for different parameters.
 static constexpr uint16_t kItvlMin = 24;        // 30 ms
 static constexpr uint16_t kItvlMax = 40;        // 50 ms
-static constexpr uint16_t kSupervisionProbe = 600;   // 6 s
-static constexpr uint16_t kSupervisionNode = 800;    // 8 s
+static constexpr uint16_t kSupervisionProbe = CONFIG_MEATNET_SUPERVISION_PROBE_MS / 10;
+static constexpr uint16_t kSupervisionNode = CONFIG_MEATNET_SUPERVISION_NODE_MS / 10;
 
 // -- per-link state ----------------------------------------------------------------
 
@@ -73,6 +75,13 @@ struct Link {
     int64_t started = 0, connected_at = 0, err_at = 0, disc_at = 0;
     int64_t backoff_ms = 10000;
     bool disconnect_sent = false;
+    // diagnostics
+    uint32_t connects = 0;
+    std::map<std::string, uint32_t> drops;
+    std::string params;
+    std::string asked;          // what the peer last asked for
+
+    uint16_t supervision() const { return kind == "node" ? kSupervisionNode : kSupervisionProbe; }
 
     void reset_conn()
     {
@@ -189,6 +198,17 @@ std::string disconnect_reason(int reason)
 }
 
 // -- GATT procedure chain (runs in NimBLE callbacks, host task) --------------------
+
+// "interval ms/latency/timeout ms" of a live connection.
+static std::string current_params(uint16_t conn)
+{
+    struct ble_gap_conn_desc d;
+    if (ble_gap_conn_find(conn, &d) != 0) return "";
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%.1fms/%u/%ums", d.conn_itvl * 1.25, d.conn_latency,
+             d.supervision_timeout * 10);
+    return buf;
+}
 
 static inline void *arg_of(const Link &l)
 {
@@ -451,6 +471,8 @@ int Links::gap_event(::ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             l->conn = event->connect.conn_handle;
             l->connected_at = now;
+            l->connects++;
+            l->params = current_params(l->conn);
             l->state = "discovering";
             int rc = ble_gattc_disc_all_svcs(l->conn, LinkOps::svc_cb, arg);
             if (rc != 0) LinkOps::fail(*l, "service discovery failed (" + std::to_string(rc) + ")");
@@ -464,6 +486,8 @@ int Links::gap_event(::ble_gap_event *event, void *arg)
         std::string why = disconnect_reason(event->disconnect.reason);
         bool was_error = l->state.rfind("error", 0) == 0;
         bool expected = !l->enabled || l->disconnect_sent;
+        int64_t up_s = l->connected_at ? (now - l->connected_at) / 1000 : 0;
+        if (!expected) l->drops[why]++;
         l->reset_conn();
         if (!l->enabled) {
             l->state = "idle";
@@ -473,9 +497,44 @@ int Links::gap_event(::ble_gap_event *event, void *arg)
             l->err_at = now - l->backoff_ms + kDropRetryMs;
         }
         if (!expected)
-            ESP_LOGW(TAG, "%s %s dropped: %s", l->kind.c_str(), proto::hex(l->key).c_str(), why.c_str());
+            ESP_LOGW(TAG, "%s %s dropped after %llds: %s (params %s, %u drops so far)",
+                     l->kind.c_str(), proto::hex(l->key).c_str(), (long long)up_s,
+                     why.c_str(), l->params.c_str(), (unsigned)l->drops[why]);
         break;
     }
+    case BLE_GAP_EVENT_CONN_UPDATE_REQ:
+    case BLE_GAP_EVENT_L2CAP_UPDATE_REQ: {
+        // The peer asks for new connection parameters (Combustion devices ask
+        // for a 500 ms interval with latency 2 right after connecting). Keep
+        // their interval, but cap the latency so they answer more often, and
+        // keep our supervision timeout as a floor: at 500 ms x (1+2) a 6 s
+        // timeout leaves only ~4 chances to hear the peer.
+        const struct ble_gap_upd_params *peer = event->conn_update_req.peer_params;
+        struct ble_gap_upd_params *self = event->conn_update_req.self_params;
+        if (self->latency > CONFIG_MEATNET_PEER_LATENCY_MAX) self->latency = CONFIG_MEATNET_PEER_LATENCY_MAX;
+        uint16_t floor = l->supervision();
+        uint32_t min_valid = ((1u + self->latency) * self->itvl_max * 125u * 2u) / 1000u + 1u;
+        if (self->supervision_timeout < floor) self->supervision_timeout = floor;
+        if (self->supervision_timeout < min_valid) self->supervision_timeout = min_valid;
+        ESP_LOGI(TAG, "%s %s asks for interval %.1f-%.1f ms, latency %u, timeout %u ms; "
+                      "using latency %u, timeout %u ms",
+                 l->kind.c_str(), proto::hex(l->key).c_str(), peer->itvl_min * 1.25,
+                 peer->itvl_max * 1.25, peer->latency, peer->supervision_timeout * 10,
+                 self->latency, self->supervision_timeout * 10);
+        l->asked = "";
+        char asked[64];
+        snprintf(asked, sizeof(asked), "%.1fms/%u/%ums", peer->itvl_max * 1.25, peer->latency,
+                 peer->supervision_timeout * 10);
+        l->asked = asked;
+        break;
+    }
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        if (event->conn_update.status == 0) {
+            l->params = current_params(l->conn);
+            ESP_LOGI(TAG, "%s %s connection parameters now %s", l->kind.c_str(),
+                     proto::hex(l->key).c_str(), l->params.c_str());
+        }
+        break;
     case BLE_GAP_EVENT_NOTIFY_RX: {
         for (auto &s : l->subs) {
             if (s.val == event->notify_rx.attr_handle) {
@@ -685,7 +744,7 @@ void Links::tick()
             p.itvl_min = kItvlMin;
             p.itvl_max = kItvlMax;
             p.latency = 0;
-            p.supervision_timeout = l.kind == "node" ? kSupervisionNode : kSupervisionProbe;
+            p.supervision_timeout = l.supervision();
             Radio::get().pause_scan();
             int rc = ble_gap_connect(own, &peer, kConnectTimeoutMs, &p, gap_event, arg_of(l));
             if (rc == 0) {
@@ -717,6 +776,10 @@ std::vector<LinkReport> Links::collect()
         r.mtu = l.mtu;
         r.count = l.count;
         r.info = l.info;
+        r.connects = l.connects;
+        r.drops = l.drops;
+        r.params = l.params;
+        r.asked = l.asked;
         for (auto &q : l.rx)
             while (!q.second.empty()) {
                 r.rx.emplace_back(q.first, std::move(q.second.front()));

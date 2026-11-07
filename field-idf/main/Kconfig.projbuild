@@ -22,4 +22,47 @@ menu "MeatNet field unit"
         int "App unit TCP/UDP port"
         default 7389
 
+    config MEATNET_SUPERVISION_PROBE_MS
+        int "Link supervision timeout for probes and MEATERs (ms)"
+        range 1000 32000
+        default 6000
+        help
+            How long a link may go without hearing the peer before it is
+            dropped. NimBLE's default is about 2.5 s; phones use 5 s or more.
+
+    config MEATNET_SUPERVISION_NODE_MS
+        int "Link supervision timeout for nodes (Gauge, Engine, Display) (ms)"
+        range 1000 32000
+        default 20000
+        help
+            A Giant Grill Gauge goes silent on the link for 8-20 s at times
+            (its own WiFi and links compete for its radio); 20 s rides most
+            of those out (as Android phones do), cutting drops to about a
+            third versus 8 s.
+
+    config MEATNET_PEER_LATENCY_MAX
+        int "Highest peripheral latency to grant a peer"
+        range 0 10
+        default 0
+        help
+            Combustion devices ask for a 500 ms interval with latency 2 (they
+            may skip two of every three connection events). Capping latency
+            makes them answer every interval: more chances to hear them
+            before the supervision timeout, at a small power cost.
+
+    choice MEATNET_COEX
+        prompt "WiFi/Bluetooth coexistence preference"
+        default MEATNET_COEX_BT
+        help
+            Which side gets the shared 2.4 GHz radio when both need it.
+            Bluetooth keeps far links alive; WiFi only carries a few KB/s here.
+
+        config MEATNET_COEX_BT
+            bool "Prefer Bluetooth"
+        config MEATNET_COEX_BALANCE
+            bool "Balance"
+        config MEATNET_COEX_WIFI
+            bool "Prefer WiFi"
+    endchoice
+
 endmenu

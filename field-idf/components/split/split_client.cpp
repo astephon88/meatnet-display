@@ -336,7 +336,10 @@ void Client::link_messages(std::vector<std::string> &out)
     for (auto &r : links.collect()) {
         std::string info_sig;
         for (auto &kv : r.info) info_sig += kv.first + "=" + kv.second + ";";
-        std::string sig = r.state + "|" + r.desc + "|" + std::to_string(r.mtu) + "|" + info_sig;
+        std::string drops_sig;
+        for (auto &kv : r.drops) drops_sig += kv.first + "=" + std::to_string(kv.second) + ";";
+        std::string sig = r.state + "|" + r.desc + "|" + std::to_string(r.mtu) + "|" + info_sig +
+                          "|" + std::to_string(r.connects) + "|" + drops_sig + "|" + r.params + "|" + r.asked;
         std::string khex = proto::hex(r.key);
         if (link_sig_[r.key] != sig) {
             link_sig_[r.key] = sig;
@@ -350,6 +353,13 @@ void Client::link_messages(std::vector<std::string> &out)
             cJSON_AddNumberToObject(m, "count", r.count);
             cJSON *info = cJSON_AddObjectToObject(m, "info");
             for (auto &kv : r.info) cJSON_AddStringToObject(info, kv.first.c_str(), kv.second.c_str());
+            // Diagnostics (an extra field; older app units ignore it).
+            cJSON *stats = cJSON_AddObjectToObject(m, "stats");
+            cJSON_AddNumberToObject(stats, "connects", r.connects);
+            cJSON *drops = cJSON_AddObjectToObject(stats, "drops");
+            for (auto &kv : r.drops) cJSON_AddNumberToObject(drops, kv.first.c_str(), kv.second);
+            cJSON_AddStringToObject(stats, "params", r.params.c_str());
+            cJSON_AddStringToObject(stats, "asked", r.asked.c_str());
             out.push_back(json_line(m));
         }
         for (auto &rx : r.rx) {

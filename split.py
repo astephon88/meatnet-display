@@ -195,6 +195,7 @@ class RemoteLink:
         self.mtu = 23
         self.desc = ""
         self.info = {}
+        self.stats = None         # field unit diagnostics (C++ unit): connects, drops, params
         self.rx = {}
         self.opened = False       # open command sent on the current connection
 
@@ -333,6 +334,8 @@ class RemoteRadio:
                 link.mtu = msg.get("mtu", 23)
                 link.count = msg.get("count", link.count)
                 link.info = msg.get("info") or link.info
+                if msg.get("stats"):
+                    link.stats = msg["stats"]
                 if state == "closed":
                     link.opened = False     # reopen on the next open_link()
         elif t == "rx":

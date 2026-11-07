@@ -7,6 +7,7 @@
 #include <cstring>
 #include <string>
 
+#include "esp_coexist.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -132,6 +133,23 @@ static bool wifi_start()
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "joining WiFi '%s'", CONFIG_MEATNET_WIFI_SSID);
+    // Who gets the shared radio when WiFi and Bluetooth both want it. The
+    // API is deprecated in this IDF and may be a no-op on some chips: log
+    // the result instead of assuming it helps.
+#if CONFIG_MEATNET_COEX_BT
+    esp_coex_prefer_t pref = ESP_COEX_PREFER_BT;
+#elif CONFIG_MEATNET_COEX_WIFI
+    esp_coex_prefer_t pref = ESP_COEX_PREFER_WIFI;
+#else
+    esp_coex_prefer_t pref = ESP_COEX_PREFER_BALANCE;
+#endif
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    esp_err_t cx = esp_coex_preference_set(pref);
+#pragma GCC diagnostic pop
+    ESP_LOGI(TAG, "coexistence preference %s: %s",
+             pref == ESP_COEX_PREFER_BT ? "Bluetooth" : pref == ESP_COEX_PREFER_WIFI ? "WiFi" : "balance",
+             esp_err_to_name(cx));
     return true;
 }
 

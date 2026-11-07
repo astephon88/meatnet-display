@@ -32,6 +32,12 @@ struct LinkReport {
     uint32_t count = 0;
     std::map<std::string, std::string> info;
     std::vector<std::pair<std::string, std::string>> rx;   // (sub, data)
+    // Diagnostics: successful connects, drops by reason, and the connection
+    // parameters in use ("interval ms / latency / supervision timeout ms").
+    uint32_t connects = 0;
+    std::map<std::string, uint32_t> drops;
+    std::string params;
+    std::string asked;          // parameters the peer last requested
 };
 
 struct Link;

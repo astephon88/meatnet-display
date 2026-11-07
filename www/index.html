@@ -217,7 +217,11 @@ function upd(s){
   }else{$('pwr').textContent='--';$('pwrbtn').style.display='none';}
   var w=s.wifi;$('wifi').textContent=w.mode=='ap'?('setup AP '+w.ap_ssid+' at '+w.ip):(w.mode=='sta'?(w.ssid+' - '+w.ip):w.mode);
   $('inb').textContent=s.inbound+' of '+s.max_conn+' BLE connections';
-  $('lnk').textContent=s.links.length?s.links.map(function(l){return l.kind+' '+l.serial+': '+l.state;}).join(', '):'none';
+  $('lnk').innerHTML=s.links.length?s.links.map(function(l){
+    var t=esc(l.kind+' '+l.serial+': '+l.state),st=l.stats;
+    if(st){var d=st.drops||{},n=0,parts=[];for(var k in d){n+=d[k];parts.push(esc(k)+' &times;'+d[k]);}
+      t+='<br><small>'+st.connects+' connects, '+n+' drops'+(parts.length?' ('+parts.join(', ')+')':'')+(st.params?', params '+esc(st.params):'')+(st.asked?' (device asked '+esc(st.asked)+')':'')+'</small>';}
+    return t;}).join('<br>'):'none';
   $('stats').textContent=s.stats.routed+' commands routed, '+s.stats.status_sent+' status updates sent'+(s.tx_dropped?', '+s.tx_dropped+' notifications dropped':'')+(s.pending?', '+s.pending+' pending':'');
   $('disp').textContent=s.display||'--';
   var v=s.via||{},fmt=function(d){var k=Object.keys(d||{}).sort();return k.length?k.map(function(x){return x+' &times;'+d[x];}).join(', '):'none';};

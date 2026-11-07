@@ -1167,6 +1167,7 @@ class Node:
             links.append({
                 "kind": link.kind,
                 "serial": self._link_name(key, link),
+                "stats": getattr(link, "stats", None),
                 "state": link.state, "count": link.count, "mtu": link.mtu})
         probes = []
         wanted = self.wanted_probes()
