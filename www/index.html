@@ -62,7 +62,7 @@ small{color:#9aa0a6}.err{color:#e06666}.ok{color:#5fd873}
 <h2 class="nofield">Other devices</h2>
 <div class="card nofield">
 <table><thead><tr><th>Device</th><th>Reading</th><th>RSSI</th><th>Upstream</th></tr></thead><tbody id="devices"></tbody></table>
-<small>An <b>upstream</b> node link (experimental) relays that node's probes and Gauge/Engine data to the app.</small>
+<small><b>Upstream</b> node links (experimental) relay those nodes' probes and Gauge/Engine data to the app. Tick several to hold a link to each (e.g. the Gauge and the Engine directly).</small>
 </div>
 
 <h2 class="nofield">Display</h2>
@@ -165,7 +165,7 @@ function toggleLink(serial,on){
   var l=(cfg.linked_probes||[]).filter(function(s){return s!=serial;});
   if(on)l.push(serial);setCfg({linked_probes:l});
 }
-function setUpstream(serial,on){setCfg({upstream_node:on?serial:''});}
+function setUpstream(serial,on){var u=(cfg.upstream_node||[]).filter(function(x){return x!=serial;});if(on)u.push(serial);setCfg({upstream_node:u});}
 function meaterCfg(addr,on,id){
   var l=(cfg.meater_probes||[]).filter(function(e){return e.addr!=addr;});
   if(on)l.push({addr:addr,id:id||8});
@@ -244,7 +244,7 @@ function upd(s){
   h='';
   s.devices.forEach(function(d){
     var r=d.temp_c!=null?T(d.temp_c):(d.setpoint_c!=null?'set '+T(d.setpoint_c):'');
-    h+='<tr><td>'+esc(d.name)+' '+esc(d.serial)+'</td><td>'+r+'</td><td>'+d.rssi+'dBm, '+d.age_s+'s</td><td><input type="checkbox"'+(cfg.upstream_node==d.serial?' checked':'')+' onchange="setUpstream(\''+d.serial+'\',this.checked)"></td></tr>';
+    h+='<tr><td>'+esc(d.name)+' '+esc(d.serial)+'</td><td>'+r+'</td><td>'+d.rssi+'dBm, '+d.age_s+'s</td><td><input type="checkbox"'+((cfg.upstream_node||[]).indexOf(d.serial)>=0?' checked':'')+' onchange="setUpstream(\''+d.serial+'\',this.checked)"></td></tr>';
   });
   $('devices').innerHTML=h||'<tr><td colspan="4"><small>No other MeatNet devices heard.</small></td></tr>';
 }

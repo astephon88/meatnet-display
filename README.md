@@ -22,9 +22,11 @@ What it does:
   - sends heartbeats and Device Connected/Disconnected messages;
   - keeps link/unlink tables and syncs them with peers (0x73–0x7B);
   - syncs the thermometer list (0x4B);
-  - can hold one **upstream** link to another node (Booster/Display/Gauge/
-    Engine). The upstream node's probes, Gauge and Engine data reach the app
-    through this device, and commands are routed back.
+  - can hold **upstream** links to other nodes (Booster/Display/Gauge/
+    Engine), one or several. Their probes, Gauge and Engine data reach the
+    app through this device, and commands are routed back. Linking both a
+    Gauge and the Engine directly keeps the Engine reachable when the Gauge
+    link drops (each takes a connection slot).
 - **Round-screen readings** in two layouts: *rotate* (one big reading per
   page, with surface/ambient and time-to-ready underneath) or *quad* (four
   per page). An optional status page shows the IP, connections and probes
@@ -311,7 +313,7 @@ charging.
 - **BLE connection budget.** MicroPython's NimBLE build allows only a few
   simultaneous connections in total, inbound and outbound together (set
   `max_conn`, default 4). One is reserved for phones (`inbound_reserve`), and
-  the rest go to relayed probes and the optional upstream node. The web UI
+  the rest go to relayed probes and any upstream nodes. The web UI
   shows how many relay slots are free. A probe accepts fewer than 3
   connections, so each probe this device relays takes one of that probe's
   slots.

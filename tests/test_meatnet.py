@@ -408,3 +408,36 @@ def test_log_read_waits_for_a_slow_start_and_holds_other_commands():
     got = {(f.msg_type, f.request_id) for f in t.frames() if f.is_response}
     assert (p.MSG_READ_LOGS, 201) in got and (p.MSG_READ_SESSION_INFO, 202) in got
     assert n.pending == []
+
+
+def test_links_to_several_upstream_nodes_and_drops_unticked_ones():
+    gauge, engine = p.encode_serial("G000001CA8"), p.encode_serial("E000002067")
+    n, t = make({"upstream_node": ["G000001CA8", "E000002067"]})
+    budget = n.link_budget()
+    for key, ptype in ((gauge, 3), (engine, 6)):
+        t.nodes[key] = (bytes((ptype,)) + key + b"\x00" * 12, 0, 0, b"\xBB" * 6, -60)
+    n.tick(now=0)
+    assert t.links[gauge].kind == "node" and t.links[engine].kind == "node"
+    for key in (gauge, engine):
+        t.links[key].state = "ready"
+    n.service(now=0)
+    t.frames()
+    # A request for another node goes out on both links, once each.
+    t.rx.append((1, p.build_request(0x62, gauge + struct.pack("<II", 0, 2), 777)))
+    n.service(now=10)
+    for key in (gauge, engine):
+        assert [p.split_frames(w)[0][0].request_id for w in t.links[key].written] == [777]
+    n.cfg["upstream_node"] = ["E000002067"]
+    assert n.link_budget() == budget + 1
+    n.tick(now=1000)
+    assert gauge not in t.links and engine in t.links
+
+
+def test_single_upstream_serial_string_still_works(tmp_path):
+    import json
+    import config
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"upstream_node": "G000001CA8"}))
+    assert config.load(str(path))["upstream_node"] == ["G000001CA8"]
+    n, _t = make({"upstream_node": "G000001CA8"})
+    assert n.upstream_serials() == [p.encode_serial("G000001CA8")]

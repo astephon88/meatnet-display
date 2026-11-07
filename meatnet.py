@@ -5,7 +5,7 @@ host tests) and the rest of the app:
 
 - decodes scan observations into a probe table and a device table;
 - keeps outbound links to the probes selected in the web UI (and optionally
-  to one upstream node), within the BLE connection budget;
+  to the upstream nodes), within the BLE connection budget;
 - answers / routes MeatNet UART requests from phones and peer nodes:
   probe list, node list, topology, probe-addressed commands (translated to
   the probe's own UART format), log reads, silence alarms, link tables;
@@ -106,9 +106,13 @@ class Node:
                 pass
         return out
 
-    def upstream_serial(self):
-        s = self.cfg.get("upstream_node") or ""
-        return protocol.encode_serial(s) if s else None
+    def upstream_serials(self):
+        """Encoded serials of the upstream nodes to hold links to (the
+        setting is a list; an older single-serial string still works)."""
+        v = self.cfg.get("upstream_node") or []
+        if isinstance(v, str):
+            v = [v]
+        return [protocol.encode_serial(s) for s in v if s]
 
     def peer_features(self):
         return self.cfg.get("meatnet_peer", True)
@@ -141,8 +145,7 @@ class Node:
         if not getattr(self.t, "separate_radios", False):
             # One radio: keep connections free for phones.
             n -= int(self.cfg.get("inbound_reserve", 1))
-        if self.upstream_serial():
-            n -= 1
+        n -= len(self.upstream_serials())
         return max(0, n)
 
     # -- ports ------------------------------------------------------------------
@@ -669,14 +672,15 @@ class Node:
                 continue          # not heard yet (needs its address type)
             t.open_link(addr, "meater", obs[2], addr)
             active.append(addr)
-        up = self.upstream_serial()
+        ups = self.upstream_serials()
         for key, link in list(t.links.items()):
-            if link.kind == "node" and key != up:
+            if link.kind == "node" and key not in ups:
                 t.close_link(key)
-        if up and up not in t.links:
-            obs = t.nodes.get(up)
-            if obs is not None:
-                t.open_link(up, "node", obs[2], obs[3])
+        for up in ups:
+            if up not in t.links:
+                obs = t.nodes.get(up)
+                if obs is not None:
+                    t.open_link(up, "node", obs[2], obs[3])
 
     def _on_node_link_ready(self, key):
         port = ("link", key)

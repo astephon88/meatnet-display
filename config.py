@@ -30,7 +30,7 @@ DEFAULTS = {
     "status_page": True,
     "readings": [],             # [{"dev": "probe:1000ABCD", "field": "core", "label": ""}]
     "linked_probes": [],        # probe serials (hex) to hold an outbound link to
-    "upstream_node": "",        # node serial to link to (phase 3), blank = none
+    "upstream_node": [],        # node serials to hold a link to (Gauge/Engine/...)
     "repeat_adverts": "all",    # "all", "linked" or "off"
     "meatnet_peer": True,       # heartbeats, link tables, device connected msgs
     "upstream_push": False,     # also push our status/heartbeats/syncs and
@@ -62,6 +62,8 @@ def load(path=None):
         for k, v in saved.items():
             if k == "pins" and isinstance(v, dict):
                 cfg["pins"].update(v)
+            elif k == "upstream_node" and isinstance(v, str):
+                cfg[k] = [v] if v else []     # was a single serial
             else:
                 cfg[k] = v
     except Exception:
