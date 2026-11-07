@@ -387,3 +387,24 @@ def test_relay_counters_show_app_using_the_display_route():
     assert n.via["app_to_node"] == {"0x62": 1}
     assert n.via["node_to_app"] == {"0x60": 1, "0x62 rsp": 1}
     assert any("app reached G000001CA8 through the Display (0x62)" in m for m in logs)
+
+
+def test_log_read_waits_for_a_slow_start_and_holds_other_commands():
+    n, t, link = linked()
+    t.frames()
+    t.rx.append((1, p.build_request(p.MSG_READ_LOGS, PROBE + struct.pack("<II", 0, 1), 201)))
+    t.rx.append((1, p.build_request(p.MSG_READ_SESSION_INFO, PROBE, 202)))
+    n.service(now=0)
+    n.tick(now=9000)                  # probe still preparing its log after 9 s
+    assert {q["type"] for q in n.pending} == {p.MSG_READ_LOGS, p.MSG_READ_SESSION_INFO}
+    assert not [f for f in t.frames() if f.is_response]   # no premature failures
+
+    def rec(seq):
+        return p.build_probe_response(p.MSG_READ_LOGS, True,
+                                      struct.pack("<I", seq) + b"\x00" * 20)
+    link.rx["uart"] = [rec(0) + rec(1) +
+                       p.build_probe_response(p.MSG_READ_SESSION_INFO, True, b"\x01" * 6)]
+    n.service(now=9500)
+    got = {(f.msg_type, f.request_id) for f in t.frames() if f.is_response}
+    assert (p.MSG_READ_LOGS, 201) in got and (p.MSG_READ_SESSION_INFO, 202) in got
+    assert n.pending == []

@@ -30,6 +30,8 @@ NODE_STALE_MS = 60000
 FRESH_MS = 5000               # a source younger than this is "live"
 PENDING_TIMEOUT_MS = 6000     # probe command without a response
 LOG_IDLE_MS = 5000            # log read with no record for this long is done
+LOG_FIRST_MS = 20000          # ...but a probe takes ~10 s to start streaming
+BUSY_TIMEOUT_MS = 20000       # other commands wait behind a log read this long
 MAX_LOG_READS = 4             # concurrent log reads kept per probe
 STRAY_LOG_MS = 30000          # rate limit for "no request waiting" messages
 HEARTBEAT_MS = 5000
@@ -732,14 +734,22 @@ class Node:
 
     # -- timeouts ---------------------------------------------------------------------
 
+    def _log_read_active(self, serial4):
+        """A probe answers other commands only after streaming a log read."""
+        for q in self.pending:
+            if q["probe"] == serial4 and q["type"] == protocol.MSG_READ_LOGS:
+                return True
+        return False
+
     def _expire(self, now):
         keep = []
         for p in self.pending:
             age = ticks_diff(now, p["at"])
             if p["type"] == protocol.MSG_READ_LOGS:
-                if age > LOG_IDLE_MS:
+                if age > (LOG_IDLE_MS if p.get("got") else LOG_FIRST_MS):
                     continue
-            elif age > PENDING_TIMEOUT_MS:
+            elif age > (BUSY_TIMEOUT_MS if self._log_read_active(p["probe"])
+                        else PENDING_TIMEOUT_MS):
                 if p["type"] != protocol.MSG_SILENCE_ALARMS:
                     self._send(p["port"], protocol.build_response(
                         p["type"], p["req"], False, b""))
@@ -907,6 +917,7 @@ class Node:
                 mtype, p["req"], True,
                 protocol.probe_to_node_payload(serial4, payload)))
             p["at"] = now
+            p["got"] = True
             p["next"] = max(p.get("next", 0), seq + 1)
             if seq >= p["end"]:
                 self.pending.remove(p)
