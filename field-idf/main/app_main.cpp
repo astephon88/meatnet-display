@@ -1,17 +1,20 @@
 // MeatNet field unit (ESP-IDF). See ../docs/field-unit-idf-plan.md.
 //
-// Joins WiFi with bootstrap credentials, scans with NimBLE, holds the links
-// the app unit asks for, and streams everything to the app unit over the
-// split protocol. The settings page (milestone 5) comes later.
+// Joins WiFi with the settings saved in NVS, scans with NimBLE, holds the
+// links the app unit asks for, and streams everything to the app unit over
+// the split protocol. Settings are changed on the unit's web page; with no
+// WiFi set up (or none reachable) it also opens a setup network for that.
 
 #include <cstring>
 #include <string>
 
+#include "cJSON.h"
 #include "esp_coexist.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -26,7 +29,9 @@
 #include "links.h"
 #include "proto.h"
 #include "radio.h"
+#include "settings.h"
 #include "split_client.h"
+#include "web.h"
 
 static const char *TAG = "field";
 
@@ -95,7 +100,59 @@ static void radio_task(void *)
     }
 }
 
-// -- WiFi (bootstrap credentials) -------------------------------------------------
+// -- WiFi --------------------------------------------------------------------------
+
+static constexpr int64_t kSetupApAfterMs = 30000;   // no IP this long: open the setup network
+
+static portMUX_TYPE g_net_mux = portMUX_INITIALIZER_UNLOCKED;
+static char g_ip[16] = "";
+static char g_setup_ap[33] = "";       // setup network's SSID while it is up
+static std::string g_serial;
+static esp_timer_handle_t g_ap_timer;
+
+static void set_net(char *dst, size_t n, const char *value)
+{
+    portENTER_CRITICAL(&g_net_mux);
+    strlcpy(dst, value, n);
+    portEXIT_CRITICAL(&g_net_mux);
+}
+
+static std::string get_net(const char *src)
+{
+    portENTER_CRITICAL(&g_net_mux);
+    std::string v(src);
+    portEXIT_CRITICAL(&g_net_mux);
+    return v;
+}
+
+// Open setup network "MeatNet-<serial>" next to the station, so the web page
+// can be reached at 192.168.4.1 to enter (or fix) the WiFi settings.
+static void setup_ap_start(void * = nullptr)
+{
+    if (!get_net(g_setup_ap).empty()) return;
+    std::string ssid = "MeatNet-" + g_serial;
+    wifi_config_t ap;
+    memset(&ap, 0, sizeof(ap));
+    strlcpy((char *)ap.ap.ssid, ssid.c_str(), sizeof(ap.ap.ssid));
+    ap.ap.ssid_len = ssid.size();
+    ap.ap.authmode = WIFI_AUTH_OPEN;
+    ap.ap.max_connection = 2;
+    ap.ap.channel = 1;
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    esp_wifi_get_mode(&mode);
+    esp_wifi_set_mode(mode == WIFI_MODE_STA ? WIFI_MODE_APSTA : WIFI_MODE_AP);
+    esp_wifi_set_config(WIFI_IF_AP, &ap);
+    set_net(g_setup_ap, sizeof(g_setup_ap), ssid.c_str());
+    ESP_LOGW(TAG, "setup network '%s' open: settings at http://192.168.4.1/", ssid.c_str());
+}
+
+static void setup_ap_stop()
+{
+    if (get_net(g_setup_ap).empty()) return;
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    set_net(g_setup_ap, sizeof(g_setup_ap), "");
+    ESP_LOGI(TAG, "setup network closed");
+}
 
 static void wifi_event(void *, esp_event_base_t base, int32_t id, void *data)
 {
@@ -103,57 +160,131 @@ static void wifi_event(void *, esp_event_base_t base, int32_t id, void *data)
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(g_events, kWifiUp);
+        set_net(g_ip, sizeof(g_ip), "");
         ESP_LOGW(TAG, "WiFi disconnected, retrying");
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         auto *ev = static_cast<ip_event_got_ip_t *>(data);
-        ESP_LOGI(TAG, "WiFi up, IP " IPSTR, IP2STR(&ev->ip_info.ip));
+        char ip[16];
+        snprintf(ip, sizeof(ip), IPSTR, IP2STR(&ev->ip_info.ip));
+        set_net(g_ip, sizeof(g_ip), ip);
+        ESP_LOGI(TAG, "WiFi up, IP %s", ip);
+        esp_timer_stop(g_ap_timer);
+        setup_ap_stop();
         xEventGroupSetBits(g_events, kWifiUp);
     }
 }
 
-static bool wifi_start()
+static void wifi_start()
 {
-    if (strlen(CONFIG_MEATNET_WIFI_SSID) == 0) {
-        ESP_LOGW(TAG, "no bootstrap WiFi SSID set (idf.py menuconfig)");
-        return false;
-    }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
+    esp_netif_create_default_wifi_ap();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, nullptr));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, nullptr));
+    esp_timer_create_args_t ta = {};
+    ta.callback = setup_ap_start;
+    ta.name = "setup_ap";
+    ESP_ERROR_CHECK(esp_timer_create(&ta, &g_ap_timer));
+
+    // Builds that set WiFi in Kconfig left it in the WiFi driver's own NVS
+    // storage: take it over once, then clear that copy so the credentials
+    // live in one place only.
     wifi_config_t wc;
     memset(&wc, 0, sizeof(wc));
-    strncpy((char *)wc.sta.ssid, CONFIG_MEATNET_WIFI_SSID, sizeof(wc.sta.ssid) - 1);
-    strncpy((char *)wc.sta.password, CONFIG_MEATNET_WIFI_PASSWORD, sizeof(wc.sta.password) - 1);
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "joining WiFi '%s'", CONFIG_MEATNET_WIFI_SSID);
+    if (esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK && wc.sta.ssid[0]) {
+        settings::adopt_wifi((const char *)wc.sta.ssid, (const char *)wc.sta.password);
+        esp_wifi_restore();
+    }
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+
+    const settings::Settings &s = settings::get();
+    if (s.wifi_ssid.empty()) {
+        ESP_LOGW(TAG, "no WiFi network set");
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+        ESP_ERROR_CHECK(esp_wifi_start());
+        setup_ap_start();
+    } else {
+        memset(&wc, 0, sizeof(wc));
+        strlcpy((char *)wc.sta.ssid, s.wifi_ssid.c_str(), sizeof(wc.sta.ssid));
+        strlcpy((char *)wc.sta.password, s.wifi_password.c_str(), sizeof(wc.sta.password));
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
+        ESP_ERROR_CHECK(esp_wifi_start());
+        esp_timer_start_once(g_ap_timer, kSetupApAfterMs * 1000);
+        ESP_LOGI(TAG, "joining WiFi '%s'", s.wifi_ssid.c_str());
+    }
     // Who gets the shared radio when WiFi and Bluetooth both want it. The
     // API is deprecated in this IDF and may be a no-op on some chips: log
     // the result instead of assuming it helps.
-#if CONFIG_MEATNET_COEX_BT
-    esp_coex_prefer_t pref = ESP_COEX_PREFER_BT;
-#elif CONFIG_MEATNET_COEX_WIFI
-    esp_coex_prefer_t pref = ESP_COEX_PREFER_WIFI;
-#else
-    esp_coex_prefer_t pref = ESP_COEX_PREFER_BALANCE;
-#endif
+    esp_coex_prefer_t pref = s.coex == "wifi" ? ESP_COEX_PREFER_WIFI
+                           : s.coex == "balance" ? ESP_COEX_PREFER_BALANCE : ESP_COEX_PREFER_BT;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     esp_err_t cx = esp_coex_preference_set(pref);
 #pragma GCC diagnostic pop
-    ESP_LOGI(TAG, "coexistence preference %s: %s",
-             pref == ESP_COEX_PREFER_BT ? "Bluetooth" : pref == ESP_COEX_PREFER_WIFI ? "WiFi" : "balance",
-             esp_err_to_name(cx));
-    return true;
+    ESP_LOGI(TAG, "coexistence preference %s: %s", s.coex.c_str(), esp_err_to_name(cx));
 }
 
 // -- main ---------------------------------------------------------------------------
+
+// /api/state for the web page.
+static split::Client *g_client = nullptr;
+
+static cJSON *state_json()
+{
+    radio::Radio &r = radio::Radio::get();
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "serial", g_serial.c_str());
+    cJSON_AddStringToObject(o, "ip", get_net(g_ip).c_str());
+    std::string ap = get_net(g_setup_ap);
+    if (!ap.empty()) cJSON_AddStringToObject(o, "setup_ap", ap.c_str());
+    cJSON_AddNumberToObject(o, "uptime_s", (double)(esp_timer_get_time() / 1000000));
+    cJSON *a = cJSON_AddObjectToObject(o, "app_unit");
+    bool up = g_client && g_client->connected();
+    cJSON_AddBoolToObject(a, "connected", up);
+    if (up) {
+        cJSON_AddStringToObject(a, "peer", g_client->peer().c_str());
+        cJSON_AddNumberToObject(a, "rtt_ms", g_client->rtt_ms());
+    }
+    size_t ready = 0, total = 0;
+    for (auto &l : radio::Links::get().collect_states()) {
+        total++;
+        if (l == "ready") ready++;
+    }
+    cJSON_AddNumberToObject(o, "links", total);
+    cJSON_AddNumberToObject(o, "links_ready", ready);
+    cJSON *h = cJSON_AddObjectToObject(o, "heard");
+    r.lock();
+    cJSON_AddNumberToObject(h, "probes", r.direct.size());
+    cJSON_AddNumberToObject(h, "repeated", r.repeated.size());
+    cJSON_AddNumberToObject(h, "nodes", r.nodes.size());
+    cJSON_AddNumberToObject(h, "meaters", r.meaters.size());
+    r.unlock();
+    cJSON_AddNumberToObject(o, "heap", esp_get_free_heap_size());
+    return o;
+}
+
+static void split_start()
+{
+    const settings::Settings &s = settings::get();
+    if (s.split_key.empty())
+        ESP_LOGW(TAG, "no shared key set: the app unit will refuse us (set it on the web page)");
+    split::Config cfg;
+    cfg.peer = s.split_peer;
+    cfg.key = s.split_key;
+    cfg.port = s.split_port;
+    cfg.serial = g_serial;
+    cfg.max_conn = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
+    cfg.mac = radio::Radio::get().address();
+    g_client = new split::Client(cfg);
+    g_client->start();
+    ESP_LOGI(TAG, "app unit: %s, port %d",
+             cfg.peer.empty() ? "find by beacon" : cfg.peer.c_str(), cfg.port);
+}
 
 extern "C" void app_main(void)
 {
@@ -163,6 +294,7 @@ extern "C" void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    settings::load();
     g_events = xEventGroupCreate();
 
     // Serial: the last 10 hex digits of the WiFi MAC, as the MicroPython unit.
@@ -170,33 +302,21 @@ extern "C" void app_main(void)
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char serial[11];
     snprintf(serial, sizeof(serial), "%02X%02X%02X%02X%02X", mac[1], mac[2], mac[3], mac[4], mac[5]);
+    g_serial = serial;
     ESP_LOGI(TAG, "MeatNet field unit (ESP-IDF), serial %s", serial);
 
-    bool wifi = wifi_start();
+    wifi_start();
+    web::start(state_json);
     ble_start();
     xEventGroupWaitBits(g_events, kBleReady, pdFALSE, pdTRUE, portMAX_DELAY);
     radio::Links::get().max_links = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
     xTaskCreate(radio_task, "radio", 6144, nullptr, 6, nullptr);
 
-    static split::Client *client = nullptr;
-    if (wifi) {
-        xEventGroupWaitBits(g_events, kWifiUp, pdFALSE, pdTRUE, portMAX_DELAY);
-        split::Config cfg;
-        cfg.peer = CONFIG_MEATNET_SPLIT_PEER;
-        cfg.key = CONFIG_MEATNET_SPLIT_KEY;
-        cfg.port = CONFIG_MEATNET_SPLIT_PORT;
-        cfg.serial = serial;
-        cfg.max_conn = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
-        cfg.mac = radio::Radio::get().address();
-        client = new split::Client(cfg);
-        client->start();
-        ESP_LOGI(TAG, "app unit: %s, port %d",
-                 cfg.peer.empty() ? "find by beacon" : cfg.peer.c_str(), cfg.port);
-    }
-
     radio::Radio &r = radio::Radio::get();
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(30000));
+    for (int tick = 1;; tick++) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (!g_client && (xEventGroupGetBits(g_events) & kWifiUp)) split_start();
+        if (tick % 30) continue;
         r.lock();
         size_t d = r.direct.size(), rep = r.repeated.size(), n = r.nodes.size(), m = r.meaters.size();
         r.unlock();
@@ -209,8 +329,8 @@ extern "C" void app_main(void)
                       "links %u/%u ready; app unit %s%s; free heap %u",
                  (unsigned)d, (unsigned)rep, (unsigned)n, (unsigned)m, (unsigned)r.adverts(),
                  (unsigned)ready, (unsigned)total,
-                 client && client->connected() ? "connected " : "offline",
-                 client && client->connected() ? client->peer().c_str() : "",
+                 g_client && g_client->connected() ? "connected " : "offline",
+                 g_client && g_client->connected() ? g_client->peer().c_str() : "",
                  (unsigned)esp_get_free_heap_size());
     }
 }

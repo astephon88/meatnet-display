@@ -226,6 +226,15 @@ field-idf/
    explained, and fixed or reduced.
 5. **Configuration UX.** Setup AP + captive page, settings page,
    NVS-backed settings, WiFi scan, reboot.
+   - Step 1 (2026-11-08, working on the field board): `components/settings`
+     (NVS namespace `meatnet`; Kconfig only supplies radio and port
+     defaults, WiFi, the app unit address and the split key come from NVS
+     only, and WiFi saved by older
+     builds in the driver's storage is adopted once and cleared there) and
+     `components/web` (page + `/api/state`, `/api/config`, `/api/reboot`;
+     secrets are never sent back, only `*_set` flags). The open setup
+     network `MeatNet-<serial>` comes up when no WiFi is set or none is
+     reachable for 30 s; captive DNS, WiFi scan and an AP password remain.
 6. **Later: status screen** on the GC9A01A (small framebuffer driver, or
    LVGL): app unit link, devices heard, link states.
 

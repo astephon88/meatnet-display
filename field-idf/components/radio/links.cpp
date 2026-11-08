@@ -8,6 +8,7 @@
 #include "host/ble_hs.h"
 #include "proto.h"
 #include "radio.h"
+#include "settings.h"
 
 namespace radio {
 
@@ -25,8 +26,6 @@ static constexpr int64_t kDropRetryMs = 1000;   // after an unexpected drop
 // kept as a floor if the peer asks for different parameters.
 static constexpr uint16_t kItvlMin = 24;        // 30 ms
 static constexpr uint16_t kItvlMax = 40;        // 50 ms
-static constexpr uint16_t kSupervisionProbe = CONFIG_MEATNET_SUPERVISION_PROBE_MS / 10;
-static constexpr uint16_t kSupervisionNode = CONFIG_MEATNET_SUPERVISION_NODE_MS / 10;
 
 // -- per-link state ----------------------------------------------------------------
 
@@ -85,7 +84,11 @@ struct Link {
     int64_t step_at = 0;        // setup timing: when the current step began
     std::string timing;         // "connect 820ms, services 1500ms (5), ..."
 
-    uint16_t supervision() const { return kind == "node" ? kSupervisionNode : kSupervisionProbe; }
+    uint16_t supervision() const
+    {
+        const auto &s = settings::get();
+        return (kind == "node" ? s.supervision_node_ms : s.supervision_probe_ms) / 10;
+    }
 
     void reset_conn()
     {
@@ -558,7 +561,8 @@ int Links::gap_event(::ble_gap_event *event, void *arg)
         // timeout leaves only ~4 chances to hear the peer.
         const struct ble_gap_upd_params *peer = event->conn_update_req.peer_params;
         struct ble_gap_upd_params *self = event->conn_update_req.self_params;
-        if (self->latency > CONFIG_MEATNET_PEER_LATENCY_MAX) self->latency = CONFIG_MEATNET_PEER_LATENCY_MAX;
+        uint16_t lat_max = settings::get().peer_latency_max;
+        if (self->latency > lat_max) self->latency = lat_max;
         uint16_t floor = l->supervision();
         uint32_t min_valid = ((1u + self->latency) * self->itvl_max * 125u * 2u) / 1000u + 1u;
         if (self->supervision_timeout < floor) self->supervision_timeout = floor;

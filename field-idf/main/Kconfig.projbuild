@@ -1,22 +1,6 @@
 menu "MeatNet field unit"
-
-    config MEATNET_WIFI_SSID
-        string "WiFi SSID (bootstrap)"
-        default ""
-        help
-            Network to join until settings are stored in NVS (milestone 5).
-
-    config MEATNET_WIFI_PASSWORD
-        string "WiFi password (bootstrap)"
-        default ""
-
-    config MEATNET_SPLIT_PEER
-        string "App unit host/IP (blank = find it by its UDP beacon)"
-        default ""
-
-    config MEATNET_SPLIT_KEY
-        string "Shared key (same as on the app unit)"
-        default ""
+    comment "Defaults for a unit's first boot; the web page changes them."
+    comment "WiFi, the app unit address and the shared key are set on the web page only (setup network MeatNet-<serial>)."
 
     config MEATNET_SPLIT_PORT
         int "App unit TCP/UDP port"

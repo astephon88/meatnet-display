@@ -1,0 +1,97 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MeatNet field unit</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.4 system-ui,sans-serif;background:#14161a;color:#e8eaed}
+.wrap{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:.2em 0}
+h2{font-size:14px;text-transform:uppercase;letter-spacing:.05em;color:#9aa0a6;margin:1.4em 0 .5em;border-bottom:1px solid #2a2e35;padding-bottom:4px}
+.card{background:#1c1f25;border:1px solid #2a2e35;border-radius:10px;padding:14px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
+.grid b{color:#9aa0a6;font-weight:400}
+label{display:block;margin:.6em 0 .2em;color:#c8ccd2;font-size:13px}
+input[type=text],input[type=password],input[type=number],select{width:100%;padding:8px;border-radius:7px;border:1px solid #333a44;background:#0f1114;color:#e8eaed;font-size:15px}
+.row{display:flex;gap:8px;align-items:center}
+.chk{display:flex;align-items:center;gap:8px;margin:.5em 0}
+.chk label{margin:0}
+button{background:#2b6cff;color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer;margin-top:10px}
+button.warn{background:#a33}
+small{color:#9aa0a6}.err{color:#e06666}.ok{color:#5fd873}
+</style></head><body><div class="wrap">
+<h1>MeatNet field unit <small id="serial"></small></h1>
+<small id="conn">connecting</small>
+
+<h2>Status</h2>
+<div class="card"><div class="grid" id="st"></div></div>
+
+<h2>WiFi</h2>
+<div class="card">
+<label>Network (SSID)</label><input type="text" id="ssid" maxlength="32">
+<label>Password <small id="pwhint"></small></label><input type="password" id="pw" maxlength="63" placeholder="leave blank to keep the saved password">
+<div class="chk"><input type="checkbox" id="openn"><label for="openn">Open network (no password)</label></div>
+</div>
+
+<h2>App unit</h2>
+<div class="card">
+<div class="row"><div style="flex:2"><label>Address <small>(blank = find it by its beacon)</small></label><input type="text" id="peer" maxlength="64"></div>
+<div style="flex:1"><label>Port</label><input type="number" id="port" min="1" max="65535"></div></div>
+<label>Shared key <small id="keyhint"></small></label><input type="password" id="key" maxlength="64" placeholder="leave blank to keep">
+</div>
+
+<h2>Radio</h2>
+<div class="card">
+<div class="row"><div style="flex:1"><label>Probe supervision timeout, ms</label><input type="number" id="supp" min="1000" max="32000" step="500"></div>
+<div style="flex:1"><label>Node supervision timeout, ms</label><input type="number" id="supn" min="1000" max="32000" step="500"></div></div>
+<label>Highest peer latency to grant <small>(0 = peers answer every interval)</small></label><input type="number" id="lat" min="0" max="10">
+<label>WiFi/Bluetooth coexistence</label>
+<select id="coex"><option value="bt">Prefer Bluetooth</option><option value="balance">Balance</option><option value="wifi">Prefer WiFi</option></select>
+</div>
+
+<button type="button" onclick="save()">Save</button>
+<button type="button" class="warn" onclick="if(confirm('Reboot now?'))reboot()">Reboot</button>
+<small id="msg">Settings apply after a reboot.</small>
+
+<script>
+var cfg={};
+function $(i){return document.getElementById(i);}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
+function post(u,o){return fetch(u,{method:'POST',body:JSON.stringify(o)}).then(function(r){return r.json();});}
+function msg(ok,t){$('msg').className=ok?'ok':'err';$('msg').textContent=t;}
+function render(){
+  $('ssid').value=cfg.wifi_ssid||'';
+  $('pwhint').textContent=cfg.wifi_password_set?'(one is saved)':'(none saved)';
+  $('peer').value=cfg.split_peer||'';$('port').value=cfg.split_port;
+  $('keyhint').textContent=cfg.split_key_set?'(one is saved; same as on the app unit)':'(none saved; same as on the app unit)';
+  $('supp').value=cfg.supervision_probe_ms;$('supn').value=cfg.supervision_node_ms;
+  $('lat').value=cfg.peer_latency_max;$('coex').value=cfg.coex;
+}
+function save(){
+  var o={wifi_ssid:$('ssid').value.trim(),split_peer:$('peer').value.trim(),split_port:+$('port').value,
+    supervision_probe_ms:+$('supp').value,supervision_node_ms:+$('supn').value,
+    peer_latency_max:+$('lat').value,coex:$('coex').value};
+  if($('openn').checked)o.wifi_password='';else if($('pw').value)o.wifi_password=$('pw').value;
+  if($('key').value)o.split_key=$('key').value;
+  post('/api/config',o).then(function(j){
+    if(!j.ok){msg(false,j.error);return;}
+    $('pw').value='';$('key').value='';$('openn').checked=false;
+    msg(true,'saved; reboot to apply');load();
+  }).catch(function(){msg(false,'save failed');});
+}
+function reboot(){post('/api/reboot',{}).then(function(){msg(true,'rebooting...');}).catch(function(){});}
+function upd(s){
+  $('serial').textContent=s.serial||'';$('conn').textContent='';
+  var a=s.app_unit||{},h=s.heard||{},rows=[
+    ['WiFi',s.setup_ap?'setup network '+esc(s.setup_ap):esc(s.ip||'not connected')],
+    ['App unit',a.connected?esc(a.peer)+(a.rtt_ms>=0?' ('+a.rtt_ms+' ms)':''):'offline'],
+    ['Links',(s.links_ready||0)+' of '+(s.links||0)+' ready'],
+    ['Heard',(h.probes||0)+' probes, '+(h.repeated||0)+' repeated, '+(h.nodes||0)+' nodes, '+(h.meaters||0)+' MEATERs'],
+    ['Up',Math.floor((s.uptime_s||0)/60)+' min'],['Free heap',Math.round((s.heap||0)/1024)+' KB']];
+  $('st').innerHTML=rows.map(function(r){return '<b>'+r[0]+'</b><span>'+r[1]+'</span>';}).join('');
+}
+function load(){fetch('/api/config').then(function(r){return r.json();}).then(function(c){cfg=c;render();});}
+function poll(){fetch('/api/state').then(function(r){return r.json();}).then(upd).catch(function(){$('conn').textContent='offline';});}
+load();poll();setInterval(poll,3000);
+</script>
+</div></body></html>
