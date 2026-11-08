@@ -58,6 +58,8 @@ struct Link {
     uint16_t conn = BLE_HS_CONN_HANDLE_NONE;
     int mtu = 23;
     uint32_t count = 0;
+    std::vector<ble_uuid_any_t> svc_uuids;  // services to discover; empty: all
+    size_t svc_q = 0;
     std::vector<Svc> svcs;
     size_t svc_i = 0;
     std::vector<Sub> subs;
@@ -80,6 +82,8 @@ struct Link {
     std::map<std::string, uint32_t> drops;
     std::string params;
     std::string asked;          // what the peer last asked for
+    int64_t step_at = 0;        // setup timing: when the current step began
+    std::string timing;         // "connect 820ms, services 1500ms (5), ..."
 
     uint16_t supervision() const { return kind == "node" ? kSupervisionNode : kSupervisionProbe; }
 
@@ -87,6 +91,7 @@ struct Link {
     {
         conn = BLE_HS_CONN_HANDLE_NONE;
         mtu = 23;
+        svc_q = 0;
         svcs.clear();
         svc_i = 0;
         for (auto &s : subs) s = Sub{s.name, s.uuid, s.required};
@@ -100,6 +105,8 @@ struct Link {
         tx_busy = false;
         disconnect_sent = false;
         connected_at = 0;
+        step_at = 0;
+        timing.clear();
     }
 };
 
@@ -126,6 +133,8 @@ static bool same(const ble_uuid_any_t &a, const ble_uuid_any_t &b)
     return ble_uuid_cmp(&a.u, &b.u) == 0;
 }
 
+static const char *kProbeStatusSvc = "00000100-CAAB-3792-3D44-97AE51C1407A";
+static const char *kUartSvc = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
 static const char *kProbeStatus = "00000101-CAAB-3792-3D44-97AE51C1407A";
 static const char *kUartTx = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 static const char *kUartRx = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
@@ -134,7 +143,10 @@ static const char *kMeaterBattery = "2ADB4877-68D8-4884-BD3C-D83853BF27B8";
 
 static void configure(Link &l)
 {
+    // Discovering only the services we use saves seconds per connect. MEATER
+    // service UUIDs vary by model, so those links discover everything.
     if (l.kind == "probe") {
+        l.svc_uuids = {uuid128(kProbeStatusSvc), uuid128(kUartSvc), uuid16(0x180A)};
         l.subs = {{"status", uuid128(kProbeStatus), true}, {"uart", uuid128(kUartTx), false}};
         l.has_write = true;
         l.write_uuid = uuid128(kUartRx);
@@ -148,6 +160,7 @@ static void configure(Link &l)
         l.backoff_ms = 10000;
     } else {                                // node: Gauge / Engine / Display
         l.kind = "node";
+        l.svc_uuids = {uuid128(kUartSvc)};
         l.subs = {{"uart", uuid128(kUartTx), true}};
         l.has_write = true;
         l.write_uuid = uuid128(kUartRx);
@@ -221,6 +234,15 @@ static inline uint32_t id_of(void *arg)
 }
 
 struct LinkOps {
+    // Ends the current setup step, adding it to the link's timing summary.
+    static void mark(Link &l, const std::string &step)
+    {
+        int64_t now = Radio::now_ms();
+        if (!l.timing.empty()) l.timing += ", ";
+        l.timing += step + " " + std::to_string(now - l.step_at) + "ms";
+        l.step_at = now;
+    }
+
     static void fail(Link &l, const std::string &why)
     {
         l.state = "error: " + why;
@@ -243,14 +265,32 @@ struct LinkOps {
             if (err->status == 0 && svc) {
                 l->svcs.push_back({svc->start_handle, svc->end_handle});
             } else if (err->status == BLE_HS_EDONE) {
-                if (l->svcs.empty()) fail(*l, "no services");
-                else next_chrs(*l);
+                l->svc_q++;
+                next_svc(*l);
             } else {
                 fail(*l, "service discovery failed (" + std::to_string(err->status) + ")");
             }
         }
         ls.unlock();
         return 0;
+    }
+
+    // Discovers the link's services one UUID at a time (or all at once).
+    static void next_svc(Link &l)
+    {
+        int rc = 0;
+        if (l.svc_uuids.empty() && l.svc_q == 0)
+            rc = ble_gattc_disc_all_svcs(l.conn, svc_cb, arg_of(l));
+        else if (l.svc_q < l.svc_uuids.size())
+            rc = ble_gattc_disc_svc_by_uuid(l.conn, &l.svc_uuids[l.svc_q].u, svc_cb, arg_of(l));
+        else {
+            mark(l, "services");
+            l.timing += " (" + std::to_string(l.svcs.size()) + ")";
+            if (l.svcs.empty()) fail(l, "no services");
+            else next_chrs(l);
+            return;
+        }
+        if (rc != 0) fail(l, "service discovery failed (" + std::to_string(rc) + ")");
     }
 
     static void next_chrs(Link &l)
@@ -266,6 +306,7 @@ struct LinkOps {
                 fail(l, "characteristic not found");
                 return;
             }
+        mark(l, "characteristics");
         next_dsc(l);
     }
 
@@ -313,6 +354,7 @@ struct LinkOps {
                 return;
             }
         }
+        mark(l, "descriptors");
         next_notify(l);
     }
 
@@ -356,6 +398,7 @@ struct LinkOps {
                 fail(l, "no CCCD for notifications");
                 return;
             }
+        mark(l, "notify");
         // Exchange the MTU before reporting ready, so large frames fit.
         int rc = ble_gattc_exchange_mtu(l.conn, mtu_cb, arg_of(l));
         if (rc != 0) ready(l);              // peer may have exchanged already
@@ -397,8 +440,11 @@ struct LinkOps {
     {
         if (l.mtu <= 23) l.mtu = ble_att_mtu(l.conn);
         l.state = "ready";
+        mark(l, "mtu");
         ESP_LOGI(TAG, "%s %s ready: %s, mtu %d", l.kind.c_str(), proto::hex(l.key).c_str(),
                  describe(l).c_str(), l.mtu);
+        ESP_LOGI(TAG, "%s %s setup took %lldms: %s", l.kind.c_str(), proto::hex(l.key).c_str(),
+                 (long long)(l.step_at - l.started), l.timing.c_str());
         next_read(l);
     }
 
@@ -474,8 +520,9 @@ int Links::gap_event(::ble_gap_event *event, void *arg)
             l->connects++;
             l->params = current_params(l->conn);
             l->state = "discovering";
-            int rc = ble_gattc_disc_all_svcs(l->conn, LinkOps::svc_cb, arg);
-            if (rc != 0) LinkOps::fail(*l, "service discovery failed (" + std::to_string(rc) + ")");
+            l->step_at = l->started;
+            LinkOps::mark(*l, "connect");
+            LinkOps::next_svc(*l);
         } else {
             l->reset_conn();
             l->state = "error: connect failed (" + std::to_string(event->connect.status) + ")";
@@ -531,8 +578,9 @@ int Links::gap_event(::ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONN_UPDATE:
         if (event->conn_update.status == 0) {
             l->params = current_params(l->conn);
-            ESP_LOGI(TAG, "%s %s connection parameters now %s", l->kind.c_str(),
-                     proto::hex(l->key).c_str(), l->params.c_str());
+            ESP_LOGI(TAG, "%s %s connection parameters now %s (%lldms after connecting)",
+                     l->kind.c_str(), proto::hex(l->key).c_str(), l->params.c_str(),
+                     (long long)(l->connected_at ? now - l->connected_at : 0));
         }
         break;
     case BLE_GAP_EVENT_NOTIFY_RX: {
