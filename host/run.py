@@ -56,12 +56,19 @@ async def _every(ms, fn, name):
 
 
 async def run_app(cfg, args, serial):
-    from host.bluez_peripheral import HostPeripheral
     from linktable import LinkTable
     from meatnet import Node
     from web import WebUI
-    local = HostPeripheral(serial, cfg.get("dis_model", "Timer REL-00001"),
-                           cfg.get("dis_firmware", "v2.6.0"), args.adapter, log)
+    model = cfg.get("dis_model", "Timer REL-00001")
+    firmware = cfg.get("dis_firmware", "v2.6.0")
+    if args.hci:
+        from host.bumble_peripheral import BumblePeripheral
+        local = BumblePeripheral(serial, model, firmware, args.hci, log)
+        radio = "Bumble " + args.hci
+    else:
+        from host.bluez_peripheral import HostPeripheral
+        local = HostPeripheral(serial, model, firmware, args.adapter, log)
+        radio = "BlueZ " + args.adapter
     await local.start()
     remote = split.RemoteRadio(log)
     transport = split.SplitTransport(local, remote)
@@ -75,8 +82,8 @@ async def run_app(cfg, args, serial):
         transport.service()
         node.service()
 
-    log("[host] app unit %s: phones -> BlueZ %s, devices via field unit on "
-        "TCP %d, web UI http://%s:%d/" % (serial, args.adapter, server.port,
+    log("[host] app unit %s: phones -> %s, devices via field unit on "
+        "TCP %d, web UI http://%s:%d/" % (serial, radio, server.port,
                                           shims.local_ip(), args.web_port))
     await asyncio.gather(server.run(), web.run(), _every(100, fast, "ble"),
                          _every(1000, node.tick, "node"))
@@ -105,6 +112,8 @@ def main():
     ap.add_argument("--config", help="settings file (default host/<role>.json)")
     ap.add_argument("--web-port", type=int, help="web UI port (default 8080 app / 8081 field)")
     ap.add_argument("--adapter", default="hci0", help="BlueZ adapter (app unit)")
+    ap.add_argument("--hci", help="app unit: use Bumble instead of BlueZ, on this "
+                    "transport (e.g. usb:0, serial:/dev/ttyACM0)")
     ap.add_argument("--peer", help="field unit: app unit host/IP (default: beacon)")
     ap.add_argument("--key", help="shared key (overrides the settings file)")
     args = ap.parse_args()
