@@ -336,6 +336,10 @@ charging.
   - thermometer-list sync behaviour.
 - Node-to-node features are experimental. Untick *MeatNet node messages* in
   Advanced if they cause trouble with your other devices.
+- **The MEATER BLE protocol isn't public.** The MEATER bridge is based on
+  observation and on code shared by the ESPHome user community, not on a
+  published spec. It may miss details, and a MEATER firmware update could
+  break it.
 
 ## Files
 
