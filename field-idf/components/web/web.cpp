@@ -1,13 +1,18 @@
 #include "web.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <map>
 #include <string>
+#include <vector>
 
 #include "cJSON.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "lwip/sockets.h"
 #include "settings.h"
 
@@ -92,6 +97,57 @@ static esp_err_t config_post(httpd_req_t *req)
     return send_result(req, ok, err, ok);
 }
 
+// Nearby networks, strongest first, one entry per name (hidden ones left
+// out). It can't run while the station is in the middle of joining a
+// network. Short channel visits with time back home in between, so the
+// link to the app unit keeps flowing: with the default (120 ms per channel)
+// the scan took ~5 s and the split session timed out, which closes every
+// device link.
+static esp_err_t wifi_scan(httpd_req_t *req)
+{
+    static std::atomic<bool> busy{false};
+    if (busy.exchange(true)) return send_result(req, false, "a scan is already running");
+    wifi_scan_config_t sc = {};
+    sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    sc.scan_time.active.min = 20;
+    sc.scan_time.active.max = 60;
+    sc.home_chan_dwell_time = 100;
+    sc.coex_background_scan = true;
+    esp_err_t err = esp_wifi_scan_start(&sc, true);
+    if (err != ESP_OK) {
+        busy = false;
+        return send_result(req, false, err == ESP_ERR_WIFI_STATE
+                                           ? "busy joining a network; try again in a moment"
+                                           : std::string("scan failed: ") + esp_err_to_name(err));
+    }
+    uint16_t n = 20;
+    static wifi_ap_record_t recs[20];          // off the server's stack; `busy` guards it
+    if (esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) n = 0;
+    std::map<std::string, const wifi_ap_record_t *> best;
+    for (uint16_t i = 0; i < n; i++) {
+        std::string ssid((const char *)recs[i].ssid);
+        if (ssid.empty()) continue;
+        auto it = best.find(ssid);
+        if (it == best.end() || recs[i].rssi > it->second->rssi) best[ssid] = &recs[i];
+    }
+    std::vector<const wifi_ap_record_t *> list;
+    for (auto &kv : best) list.push_back(kv.second);
+    std::sort(list.begin(), list.end(),
+              [](const wifi_ap_record_t *a, const wifi_ap_record_t *b) { return a->rssi > b->rssi; });
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON *arr = cJSON_AddArrayToObject(o, "networks");
+    for (auto *r : list) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "ssid", (const char *)r->ssid);
+        cJSON_AddNumberToObject(e, "rssi", r->rssi);
+        cJSON_AddBoolToObject(e, "secure", r->authmode != WIFI_AUTH_OPEN);
+        cJSON_AddItemToArray(arr, e);
+    }
+    busy = false;
+    return send_json(req, o);
+}
+
 // Unknown paths: on the setup network, send the phone to the settings page
 // (its captive-portal check lands here, since the setup network's DNS
 // answers every name with the unit); elsewhere a plain 404.
@@ -164,6 +220,7 @@ void start(std::function<cJSON *()> state_fn, uint32_t setup_ip)
         {"/api/state", HTTP_GET, state, nullptr},
         {"/api/config", HTTP_GET, config_get, nullptr},
         {"/api/config", HTTP_POST, config_post, nullptr},
+        {"/api/wifi/scan", HTTP_GET, wifi_scan, nullptr},
         {"/api/reboot", HTTP_POST, reboot, nullptr},
     };
     for (const auto &u : uris) httpd_register_uri_handler(server, &u);

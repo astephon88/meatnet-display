@@ -3,6 +3,7 @@
 //   GET  /api/state    status (from the callback given to start())
 //   GET  /api/config   settings, secrets as "<name>_set" flags
 //   POST /api/config   change settings (applied after a reboot)
+//   GET  /api/wifi/scan  nearby networks: {ok, networks: [{ssid, rssi, secure}]}
 //   POST /api/reboot
 // On the setup network, any other path redirects to the page (captive
 // portal); elsewhere it is a 404.

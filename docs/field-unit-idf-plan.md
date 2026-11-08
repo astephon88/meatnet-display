@@ -243,7 +243,17 @@ field-idf/
      setup network (`ap_password`, a secret like the others). While the
      setup network is up, WiFi is retried only every 60 s (none while a
      device is on it): each attempt scans all channels, and the setup
-     network couldn't be joined meanwhile. WiFi scan remains (step 3).
+     network couldn't be joined meanwhile.
+   - Step 3 (2026-11-08, working on the field board): WiFi scan on the
+     page (`GET /api/wifi/scan`, same JSON as the MicroPython unit:
+     strongest first, one entry per name, hidden networks left out). With
+     the default scan (120 ms per channel, ~5 s) the split session timed
+     out, which closes every device link; 20-60 ms per channel with 100 ms
+     back home in between (and coex background scan) takes ~6.4 s and kept
+     the session up through three scans in a row. An unconfigured unit runs
+     the setup network next to an idle station, so the scan works there too
+     (checked). The Scan button is disabled with a status line while a
+     scan runs.
 6. **Later: status screen** on the GC9A01A (small framebuffer driver, or
    LVGL): app unit link, devices heard, link states.
 

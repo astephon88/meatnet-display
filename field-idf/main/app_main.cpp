@@ -151,9 +151,8 @@ static void setup_ap_start(void * = nullptr)
     ap.ap.authmode = pw.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
     ap.ap.max_connection = 2;
     ap.ap.channel = 1;
-    wifi_mode_t mode = WIFI_MODE_NULL;
-    esp_wifi_get_mode(&mode);
-    esp_wifi_set_mode(mode == WIFI_MODE_STA ? WIFI_MODE_APSTA : WIFI_MODE_AP);
+    // The station stays on (idle without a network) so the page can scan.
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
     esp_wifi_set_config(WIFI_IF_AP, &ap);
     set_net(g_setup_ap, sizeof(g_setup_ap), ssid.c_str());
     captive::start(g_ap_ip.ip.addr);
@@ -183,7 +182,7 @@ static void sta_retry(void *)
 static void wifi_event(void *, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        if (!settings::get().wifi_ssid.empty()) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(g_events, kWifiUp);
         set_net(g_ip, sizeof(g_ip), "");
@@ -261,7 +260,7 @@ static void wifi_start()
     const settings::Settings &s = settings::get();
     if (s.wifi_ssid.empty()) {
         ESP_LOGW(TAG, "no WiFi network set");
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
         ESP_ERROR_CHECK(esp_wifi_start());
         setup_ap_start();
     } else {

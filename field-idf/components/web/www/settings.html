@@ -17,7 +17,7 @@ input[type=text],input[type=password],input[type=number],select{width:100%;paddi
 .chk{display:flex;align-items:center;gap:8px;margin:.5em 0}
 .chk label{margin:0}
 button{background:#2b6cff;color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer;margin-top:10px}
-button.warn{background:#a33}
+button.warn{background:#a33}button.sec{background:#333a44}button.sm{padding:5px 9px;margin:0}button:disabled{opacity:.5;cursor:default}
 small{color:#9aa0a6}.err{color:#e06666}.ok{color:#5fd873}
 </style></head><body><div class="wrap">
 <h1>MeatNet field unit <small id="serial"></small></h1>
@@ -28,6 +28,10 @@ small{color:#9aa0a6}.err{color:#e06666}.ok{color:#5fd873}
 
 <h2>WiFi</h2>
 <div class="card">
+<label>Nearby networks</label>
+<div class="row"><select id="ssidsel" onchange="if(this.value)$('ssid').value=this.value"><option value="">(scan to list networks)</option></select>
+<button type="button" class="sec sm" id="scanb" onclick="scan()">Scan</button></div>
+<small id="scanmsg"></small>
 <label>Network (SSID)</label><input type="text" id="ssid" maxlength="32">
 <label>Password <small id="pwhint"></small></label><input type="password" id="pw" maxlength="63" placeholder="leave blank to keep the saved password">
 <div class="chk"><input type="checkbox" id="openn"><label for="openn">Open network (no password)</label></div>
@@ -83,6 +87,16 @@ function save(){
     $('pw').value='';$('key').value='';$('appw').value='';$('openn').checked=false;$('apopen').checked=false;
     msg(true,'saved; reboot to apply');load();
   }).catch(function(){msg(false,'save failed');});
+}
+function scan(){
+  var b=$('scanb'),m=$('scanmsg');
+  b.disabled=true;b.textContent='Scanning...';m.className='';m.textContent='takes a few seconds';
+  fetch('/api/wifi/scan').then(function(r){return r.json();}).then(function(j){
+    if(!j.ok){m.className='err';m.textContent=j.error;return;}
+    m.className='ok';m.textContent=j.networks.length+' networks found';
+    $('ssidsel').innerHTML='<option value="">(choose)</option>'+j.networks.map(function(n){
+      return '<option value="'+esc(n.ssid)+'">'+esc(n.ssid)+' ('+n.rssi+' dBm'+(n.secure?'':', open')+')</option>';}).join('');
+  }).catch(function(){m.className='err';m.textContent='scan failed';}).then(function(){b.disabled=false;b.textContent='Scan';});
 }
 function reboot(){post('/api/reboot',{}).then(function(){msg(true,'rebooting...');}).catch(function(){});}
 function upd(s){
