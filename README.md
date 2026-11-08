@@ -1,5 +1,10 @@
 # MeatNet Display (ESP32-S3 + GC9A01A, MicroPython)
 
+> [!NOTE]
+> This project was written with the assistance of an LLM (Anthropic's Claude,
+> via Claude Code). It has been tested on real hardware, but review the code
+> before relying on it.
+
 Turns a **Waveshare ESP32-S3-LCD-1.28** (or any ESP32-S3 with a GC9A01A round
 LCD) into a Combustion Inc. **MeatNet node** that relays between the
 Combustion phone app and probes/nodes that would otherwise be out of range,
