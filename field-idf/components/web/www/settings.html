@@ -31,6 +31,9 @@ small{color:#9aa0a6}.err{color:#e06666}.ok{color:#5fd873}
 <label>Network (SSID)</label><input type="text" id="ssid" maxlength="32">
 <label>Password <small id="pwhint"></small></label><input type="password" id="pw" maxlength="63" placeholder="leave blank to keep the saved password">
 <div class="chk"><input type="checkbox" id="openn"><label for="openn">Open network (no password)</label></div>
+<label>Setup network password <small id="aphint"></small></label><input type="password" id="appw" maxlength="63" placeholder="leave blank to keep">
+<div class="chk"><input type="checkbox" id="apopen"><label for="apopen">Open setup network (no password)</label></div>
+<small>The unit opens its setup network <span id="apname">MeatNet-&lt;serial&gt;</span> when no WiFi is set or none can be reached.</small>
 </div>
 
 <h2>App unit</h2>
@@ -66,6 +69,7 @@ function render(){
   $('keyhint').textContent=cfg.split_key_set?'(one is saved; same as on the app unit)':'(none saved; same as on the app unit)';
   $('supp').value=cfg.supervision_probe_ms;$('supn').value=cfg.supervision_node_ms;
   $('lat').value=cfg.peer_latency_max;$('coex').value=cfg.coex;
+  $('aphint').textContent=cfg.ap_password_set?'(one is saved)':'(none saved: the setup network is open)';
 }
 function save(){
   var o={wifi_ssid:$('ssid').value.trim(),split_peer:$('peer').value.trim(),split_port:+$('port').value,
@@ -73,15 +77,16 @@ function save(){
     peer_latency_max:+$('lat').value,coex:$('coex').value};
   if($('openn').checked)o.wifi_password='';else if($('pw').value)o.wifi_password=$('pw').value;
   if($('key').value)o.split_key=$('key').value;
+  if($('apopen').checked)o.ap_password='';else if($('appw').value)o.ap_password=$('appw').value;
   post('/api/config',o).then(function(j){
     if(!j.ok){msg(false,j.error);return;}
-    $('pw').value='';$('key').value='';$('openn').checked=false;
+    $('pw').value='';$('key').value='';$('appw').value='';$('openn').checked=false;$('apopen').checked=false;
     msg(true,'saved; reboot to apply');load();
   }).catch(function(){msg(false,'save failed');});
 }
 function reboot(){post('/api/reboot',{}).then(function(){msg(true,'rebooting...');}).catch(function(){});}
 function upd(s){
-  $('serial').textContent=s.serial||'';$('conn').textContent='';
+  $('serial').textContent=s.serial||'';$('conn').textContent='';$('apname').textContent='MeatNet-'+(s.serial||'');
   var a=s.app_unit||{},h=s.heard||{},rows=[
     ['WiFi',s.setup_ap?'setup network '+esc(s.setup_ap):esc(s.ip||'not connected')],
     ['App unit',a.connected?esc(a.peer)+(a.rtt_ms>=0?' ('+a.rtt_ms+' ms)':''):'offline'],

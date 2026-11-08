@@ -5,6 +5,7 @@
 // the split protocol. Settings are changed on the unit's web page; with no
 // WiFi set up (or none reachable) it also opens a setup network for that.
 
+#include <atomic>
 #include <cstring>
 #include <string>
 
@@ -26,6 +27,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 
+#include "captive.h"
 #include "links.h"
 #include "proto.h"
 #include "radio.h"
@@ -103,12 +105,19 @@ static void radio_task(void *)
 // -- WiFi --------------------------------------------------------------------------
 
 static constexpr int64_t kSetupApAfterMs = 30000;   // no IP this long: open the setup network
+// While the setup network is up, WiFi is retried this rarely: every attempt
+// scans all channels, and the setup network (same radio) can't be joined
+// meanwhile. No retries at all while a phone is on the setup network.
+static constexpr int64_t kSetupRetryMs = 60000;
 
 static portMUX_TYPE g_net_mux = portMUX_INITIALIZER_UNLOCKED;
 static char g_ip[16] = "";
 static char g_setup_ap[33] = "";       // setup network's SSID while it is up
 static std::string g_serial;
 static esp_timer_handle_t g_ap_timer;
+static esp_timer_handle_t g_retry_timer;
+static std::atomic<int> g_ap_clients{0};
+static esp_netif_ip_info_t g_ap_ip;    // the setup network's address (192.168.4.1)
 
 static void set_net(char *dst, size_t n, const char *value)
 {
@@ -125,17 +134,21 @@ static std::string get_net(const char *src)
     return v;
 }
 
-// Open setup network "MeatNet-<serial>" next to the station, so the web page
-// can be reached at 192.168.4.1 to enter (or fix) the WiFi settings.
+// Setup network "MeatNet-<serial>" next to the station, so the web page can
+// be reached at 192.168.4.1 to enter (or fix) the WiFi settings. Open unless
+// a setup password is saved; its DNS sends phones to the page (captive
+// portal).
 static void setup_ap_start(void * = nullptr)
 {
     if (!get_net(g_setup_ap).empty()) return;
     std::string ssid = "MeatNet-" + g_serial;
+    const std::string &pw = settings::get().ap_password;
     wifi_config_t ap;
     memset(&ap, 0, sizeof(ap));
     strlcpy((char *)ap.ap.ssid, ssid.c_str(), sizeof(ap.ap.ssid));
     ap.ap.ssid_len = ssid.size();
-    ap.ap.authmode = WIFI_AUTH_OPEN;
+    strlcpy((char *)ap.ap.password, pw.c_str(), sizeof(ap.ap.password));
+    ap.ap.authmode = pw.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
     ap.ap.max_connection = 2;
     ap.ap.channel = 1;
     wifi_mode_t mode = WIFI_MODE_NULL;
@@ -143,15 +156,28 @@ static void setup_ap_start(void * = nullptr)
     esp_wifi_set_mode(mode == WIFI_MODE_STA ? WIFI_MODE_APSTA : WIFI_MODE_AP);
     esp_wifi_set_config(WIFI_IF_AP, &ap);
     set_net(g_setup_ap, sizeof(g_setup_ap), ssid.c_str());
-    ESP_LOGW(TAG, "setup network '%s' open: settings at http://192.168.4.1/", ssid.c_str());
+    captive::start(g_ap_ip.ip.addr);
+    esp_wifi_disconnect();          // stop the current attempt; retried slowly from now on
+    ESP_LOGW(TAG, "setup network '%s' up (%s): settings at http://" IPSTR "/", ssid.c_str(),
+             pw.empty() ? "open" : "WPA2", IP2STR(&g_ap_ip.ip));
 }
 
 static void setup_ap_stop()
 {
     if (get_net(g_setup_ap).empty()) return;
+    esp_timer_stop(g_retry_timer);
+    captive::stop();
     esp_wifi_set_mode(WIFI_MODE_STA);
     set_net(g_setup_ap, sizeof(g_setup_ap), "");
     ESP_LOGI(TAG, "setup network closed");
+}
+
+static void sta_retry(void *)
+{
+    if (g_ap_clients > 0)
+        esp_timer_start_once(g_retry_timer, kSetupRetryMs * 1000);   // a phone is setting us up
+    else
+        esp_wifi_connect();
 }
 
 static void wifi_event(void *, esp_event_base_t base, int32_t id, void *data)
@@ -161,8 +187,20 @@ static void wifi_event(void *, esp_event_base_t base, int32_t id, void *data)
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(g_events, kWifiUp);
         set_net(g_ip, sizeof(g_ip), "");
-        ESP_LOGW(TAG, "WiFi disconnected, retrying");
-        esp_wifi_connect();
+        if (get_net(g_setup_ap).empty()) {
+            ESP_LOGW(TAG, "WiFi disconnected, retrying");
+            esp_wifi_connect();
+        } else if (!esp_timer_is_active(g_retry_timer)) {
+            ESP_LOGW(TAG, "WiFi not reachable; retrying in %llds (setup network up)",
+                     (long long)(kSetupRetryMs / 1000));
+            esp_timer_start_once(g_retry_timer, kSetupRetryMs * 1000);
+        }
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+        g_ap_clients++;
+        ESP_LOGI(TAG, "a device joined the setup network (%d on it)", g_ap_clients.load());
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+        if (g_ap_clients > 0) g_ap_clients--;
+        ESP_LOGI(TAG, "a device left the setup network (%d on it)", g_ap_clients.load());
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         auto *ev = static_cast<ip_event_got_ip_t *>(data);
         char ip[16];
@@ -180,7 +218,23 @@ static void wifi_start()
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
-    esp_netif_create_default_wifi_ap();
+    esp_netif_t *ap = esp_netif_create_default_wifi_ap();
+    // The setup network's DHCP hands out the unit itself as DNS server, and
+    // the page as captive-portal address (RFC 8910) for phones that ask.
+    static char portal_uri[32];
+    esp_netif_get_ip_info(ap, &g_ap_ip);
+    snprintf(portal_uri, sizeof(portal_uri), "http://" IPSTR "/", IP2STR(&g_ap_ip.ip));
+    esp_netif_dns_info_t dns = {};
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4 = g_ap_ip.ip;
+    uint8_t offer_dns = 1;
+    esp_netif_dhcps_stop(ap);
+    esp_netif_set_dns_info(ap, ESP_NETIF_DNS_MAIN, &dns);
+    esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer_dns,
+                           sizeof(offer_dns));
+    esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI, portal_uri,
+                           strlen(portal_uri));
+    esp_netif_dhcps_start(ap);
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, nullptr));
@@ -189,6 +243,9 @@ static void wifi_start()
     ta.callback = setup_ap_start;
     ta.name = "setup_ap";
     ESP_ERROR_CHECK(esp_timer_create(&ta, &g_ap_timer));
+    ta.callback = sta_retry;
+    ta.name = "sta_retry";
+    ESP_ERROR_CHECK(esp_timer_create(&ta, &g_retry_timer));
 
     // Builds that set WiFi in Kconfig left it in the WiFi driver's own NVS
     // storage: take it over once, then clear that copy so the credentials
@@ -306,7 +363,7 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "MeatNet field unit (ESP-IDF), serial %s", serial);
 
     wifi_start();
-    web::start(state_json);
+    web::start(state_json, g_ap_ip.ip.addr);
     ble_start();
     xEventGroupWaitBits(g_events, kBleReady, pdFALSE, pdTRUE, portMAX_DELAY);
     radio::Links::get().max_links = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;

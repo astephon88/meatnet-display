@@ -23,6 +23,7 @@ static Settings g = {
 #else
     "bt",
 #endif
+    "",
 };
 
 // -- NVS helpers (NVS keys are at most 15 characters) ---------------------------
@@ -57,6 +58,7 @@ void load()
     get_int(h, "sup_node_ms", g.supervision_node_ms);
     get_int(h, "lat_max", g.peer_latency_max);
     get_str(h, "coex", g.coex);
+    get_str(h, "ap_pw", g.ap_password);
     nvs_close(h);
 }
 
@@ -75,6 +77,7 @@ static bool save(const Settings &s)
            && nvs_set_i32(h, "sup_node_ms", s.supervision_node_ms) == ESP_OK
            && nvs_set_i32(h, "lat_max", s.peer_latency_max) == ESP_OK
            && nvs_set_str(h, "coex", s.coex.c_str()) == ESP_OK
+           && nvs_set_str(h, "ap_pw", s.ap_password.c_str()) == ESP_OK
            && nvs_commit(h) == ESP_OK;
     nvs_close(h);
     return ok;
@@ -94,6 +97,7 @@ cJSON *to_json()
     cJSON_AddNumberToObject(o, "supervision_node_ms", g.supervision_node_ms);
     cJSON_AddNumberToObject(o, "peer_latency_max", g.peer_latency_max);
     cJSON_AddStringToObject(o, "coex", g.coex.c_str());
+    cJSON_AddBoolToObject(o, "ap_password_set", !g.ap_password.empty());
     return o;
 }
 
@@ -128,7 +132,7 @@ static bool take_int(const cJSON *obj, const char *name, int lo, int hi, int &ou
 bool update(const cJSON *obj, std::string &err)
 {
     Settings s = g;
-    std::string pw = s.wifi_password, key = s.split_key;
+    std::string pw = s.wifi_password, key = s.split_key, ap_pw = s.ap_password;
     if (!take_str(obj, "wifi_ssid", 32, s.wifi_ssid, err)
         || !take_str(obj, "wifi_password", 63, pw, err)
         || !take_str(obj, "split_peer", 64, s.split_peer, err)
@@ -137,7 +141,8 @@ bool update(const cJSON *obj, std::string &err)
         || !take_int(obj, "supervision_probe_ms", 1000, 32000, s.supervision_probe_ms, err)
         || !take_int(obj, "supervision_node_ms", 1000, 32000, s.supervision_node_ms, err)
         || !take_int(obj, "peer_latency_max", 0, 10, s.peer_latency_max, err)
-        || !take_str(obj, "coex", 7, s.coex, err))
+        || !take_str(obj, "coex", 7, s.coex, err)
+        || !take_str(obj, "ap_password", 63, ap_pw, err))
         return false;
     if (s.coex != "bt" && s.coex != "balance" && s.coex != "wifi") {
         err = "coex: bt, balance or wifi";
@@ -147,10 +152,15 @@ bool update(const cJSON *obj, std::string &err)
         err = "wifi_password: 8 to 63 characters (empty = open network)";
         return false;
     }
+    if (!ap_pw.empty() && ap_pw.size() < 8) {
+        err = "ap_password: 8 to 63 characters (empty = open setup network)";
+        return false;
+    }
     // A blank split key in the form means "keep"; it can't be cleared to
     // nothing, since the app unit always checks it.
     if (!key.empty()) s.split_key = key;
     s.wifi_password = pw;
+    s.ap_password = ap_pw;
     if (!save(s)) {
         err = "could not save to flash";
         return false;

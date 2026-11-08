@@ -20,6 +20,7 @@ struct Settings {
     int supervision_node_ms;
     int peer_latency_max;
     std::string coex;               // "bt", "balance" or "wifi"
+    std::string ap_password;        // secret; setup network, "" = open
 };
 
 void load();
@@ -30,8 +31,8 @@ const Settings &get();
 cJSON *to_json();
 
 // Applies the fields present in `obj`, validates them and saves them to NVS.
-// Secrets: a missing wifi_password keeps the saved one ("" = open network);
-// a missing or empty split_key keeps the saved one. Returns false with `err`
+// Secrets: a missing wifi_password or ap_password keeps the saved one
+// ("" = open network); a missing or empty split_key keeps the saved one. Returns false with `err`
 // set when a value is invalid; nothing is saved then.
 bool update(const cJSON *obj, std::string &err);
 

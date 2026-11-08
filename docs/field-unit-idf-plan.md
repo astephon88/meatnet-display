@@ -234,7 +234,16 @@ field-idf/
      `components/web` (page + `/api/state`, `/api/config`, `/api/reboot`;
      secrets are never sent back, only `*_set` flags). The open setup
      network `MeatNet-<serial>` comes up when no WiFi is set or none is
-     reachable for 30 s; captive DNS, WiFi scan and an AP password remain.
+     reachable for 30 s.
+   - Step 2 (2026-11-08, working with an Android phone): captive portal on
+     the setup network: `components/captive` answers every DNS name with
+     the unit, DHCP offers the unit as DNS and the page as RFC 8910
+     captive-portal URI, and unknown paths arriving on the setup network
+     redirect to the page (404 elsewhere). Optional WPA2 password for the
+     setup network (`ap_password`, a secret like the others). While the
+     setup network is up, WiFi is retried only every 60 s (none while a
+     device is on it): each attempt scans all channels, and the setup
+     network couldn't be joined meanwhile. WiFi scan remains (step 3).
 6. **Later: status screen** on the GC9A01A (small framebuffer driver, or
    LVGL): app unit link, devices heard, link states.
 

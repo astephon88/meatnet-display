@@ -1,5 +1,6 @@
 #include "web.h"
 
+#include <cstring>
 #include <string>
 
 #include "cJSON.h"
@@ -7,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "lwip/sockets.h"
 #include "settings.h"
 
 extern const char page_start[] asm("_binary_settings_html_start");
@@ -17,6 +19,7 @@ namespace web {
 static const char *TAG = "web";
 static constexpr size_t kMaxBody = 2048;
 static std::function<cJSON *()> g_state;
+static uint32_t g_setup_ip;
 
 static esp_err_t send_json(httpd_req_t *req, cJSON *o)
 {
@@ -89,6 +92,43 @@ static esp_err_t config_post(httpd_req_t *req)
     return send_result(req, ok, err, ok);
 }
 
+// Unknown paths: on the setup network, send the phone to the settings page
+// (its captive-portal check lands here, since the setup network's DNS
+// answers every name with the unit); elsewhere a plain 404.
+// The local IPv4 address a request arrived on (network byte order), or 0.
+// With IPv6 on, the server's socket is dual-stack and reports IPv4 peers as
+// IPv4-mapped IPv6 addresses (::ffff:a.b.c.d).
+static uint32_t local_ipv4(httpd_req_t *req)
+{
+    sockaddr_storage local = {};
+    socklen_t len = sizeof(local);
+    if (getsockname(httpd_req_to_sockfd(req), (sockaddr *)&local, &len) != 0) return 0;
+    uint32_t ip = 0;
+    if (local.ss_family == AF_INET) {
+        ip = ((sockaddr_in *)&local)->sin_addr.s_addr;
+    } else if (local.ss_family == AF_INET6) {
+        const uint8_t *a = (const uint8_t *)&((sockaddr_in6 *)&local)->sin6_addr;
+        static const uint8_t mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+        if (memcmp(a, mapped, sizeof(mapped)) == 0) memcpy(&ip, a + 12, 4);
+    }
+    return ip;
+}
+
+static esp_err_t not_found(httpd_req_t *req, httpd_err_code_t)
+{
+    uint32_t ip = local_ipv4(req);
+    if (ip && ip == g_setup_ip) {
+        char loc[32];
+        snprintf(loc, sizeof(loc), "http://%u.%u.%u.%u/", (unsigned)(ip & 0xFF),
+                 (unsigned)(ip >> 8 & 0xFF), (unsigned)(ip >> 16 & 0xFF), (unsigned)(ip >> 24));
+        httpd_resp_set_status(req, "302 Found");
+        httpd_resp_set_hdr(req, "Location", loc);
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        return httpd_resp_send(req, nullptr, 0);
+    }
+    return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, nullptr);
+}
+
 static void restart(void *) { esp_restart(); }
 
 static esp_err_t reboot(httpd_req_t *req)
@@ -106,11 +146,12 @@ static esp_err_t reboot(httpd_req_t *req)
     return ESP_OK;
 }
 
-void start(std::function<cJSON *()> state_fn)
+void start(std::function<cJSON *()> state_fn, uint32_t setup_ip)
 {
     g_state = state_fn;
+    g_setup_ip = setup_ip;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_open_sockets = 3;       // lwIP has 10 sockets; the split link needs 2
+    cfg.max_open_sockets = 3;       // lwIP has 10 sockets; split link + captive DNS need 3
     cfg.lru_purge_enable = true;
     cfg.stack_size = 6144;
     httpd_handle_t server = nullptr;
@@ -126,6 +167,7 @@ void start(std::function<cJSON *()> state_fn)
         {"/api/reboot", HTTP_POST, reboot, nullptr},
     };
     for (const auto &u : uris) httpd_register_uri_handler(server, &u);
+    httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, not_found);
     ESP_LOGI(TAG, "web page on port %d", cfg.server_port);
 }
 
