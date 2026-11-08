@@ -367,3 +367,8 @@ python tools/preview.py         # render sample screen pages to docs/preview/ (P
 
 The pins default to the non-touch Waveshare board (SCK 10, MOSI 11, DC 8,
 CS 9, RST 12, BL 40). Change them under Advanced → Display pins.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Combustion, MeatNet and MEATER are trademarks of
+their owners; this project isn't affiliated with or endorsed by them.
