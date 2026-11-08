@@ -3,3 +3,5 @@ links.json
 __pycache__/
 .pytest_cache/
 host/*.json
+HANDOFF.md
+CLAUDE.md
