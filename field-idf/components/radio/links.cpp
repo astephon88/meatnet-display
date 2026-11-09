@@ -852,6 +852,15 @@ std::vector<std::string> Links::collect_states()
     return out;
 }
 
+std::vector<LinkBrief> Links::collect_brief()
+{
+    std::vector<LinkBrief> out;
+    lock();
+    for (auto &kv : links_) out.push_back({kv.second->key, kv.second->kind, kv.second->state});
+    unlock();
+    return out;
+}
+
 std::vector<std::string> Links::take_removed()
 {
     lock();

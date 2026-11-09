@@ -40,6 +40,11 @@ struct LinkReport {
     std::string asked;          // parameters the peer last requested
 };
 
+// Just a link's identity and state (for the status screen).
+struct LinkBrief {
+    std::string key, kind, state;
+};
+
 struct Link;
 
 class Links {
@@ -62,6 +67,7 @@ public:
     std::vector<LinkReport> collect();
     std::vector<std::string> take_removed();
     std::vector<std::string> collect_states();   // link states only (doesn't drain rx)
+    std::vector<LinkBrief> collect_brief();      // key/kind/state (doesn't drain rx)
 
     bool any_connected();
     bool connecting();

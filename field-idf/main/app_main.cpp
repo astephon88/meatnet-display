@@ -31,6 +31,7 @@
 #include "links.h"
 #include "proto.h"
 #include "radio.h"
+#include "screen.h"
 #include "settings.h"
 #include "split_client.h"
 #include "web.h"
@@ -324,6 +325,53 @@ static cJSON *state_json()
     return o;
 }
 
+// A link's name for the screen: node serial, probe serial, or MEATER.
+static std::string link_name(const radio::LinkBrief &l)
+{
+    if (l.kind == "node") return l.key;                         // 10 ASCII characters
+    if (l.kind == "probe" && l.key.size() == 4) {               // little-endian serial
+        char buf[9];
+        snprintf(buf, sizeof(buf), "%02X%02X%02X%02X", (uint8_t)l.key[3], (uint8_t)l.key[2],
+                 (uint8_t)l.key[1], (uint8_t)l.key[0]);
+        return buf;
+    }
+    return "MEATER";
+}
+
+static screen::Content screen_content()
+{
+    screen::Content c;
+    c.title = "Field unit";
+    std::string ap = get_net(g_setup_ap), ip = get_net(g_ip);
+    if (!ap.empty()) {
+        c.lines.push_back("Join WiFi");
+        c.lines.push_back(ap);
+        char url[32];
+        snprintf(url, sizeof(url), "http://" IPSTR "/", IP2STR(&g_ap_ip.ip));
+        c.lines.push_back(url);
+    } else {
+        bool up = g_client && g_client->connected();
+        c.lines.push_back(up ? "app " + g_client->peer() : "app unit offline");
+        c.lines.push_back(ip.empty() ? "WiFi connecting" : ip);
+    }
+    auto links = radio::Links::get().collect_brief();
+    radio::Radio &r = radio::Radio::get();
+    r.lock();
+    size_t probes = r.direct.size(), nodes = r.nodes.size(), meaters = r.meaters.size();
+    r.unlock();
+    std::string heard = "heard " + std::to_string(probes) + (probes == 1 ? " probe, " : " probes, ") +
+                        std::to_string(nodes) + (nodes == 1 ? " node" : " nodes");
+    c.lines.push_back(heard);
+    if (meaters) c.lines.push_back("heard " + std::to_string(meaters) + (meaters == 1 ? " MEATER" : " MEATERs"));
+    for (auto &l : links) {
+        if (!ap.empty()) break;               // setup mode: no app unit, so no links
+        const char *st = l.state == "ready" ? "up"
+                       : l.state == "connecting" || l.state == "discovering" ? "conn" : "down";
+        c.lines.push_back(link_name(l) + " " + st);
+    }
+    return c;
+}
+
 static void split_start()
 {
     const settings::Settings &s = settings::get();
@@ -363,6 +411,7 @@ extern "C" void app_main(void)
 
     wifi_start();
     web::start(state_json, g_ap_ip.ip.addr);
+    screen::start(screen_content);
     ble_start();
     xEventGroupWaitBits(g_events, kBleReady, pdFALSE, pdTRUE, portMAX_DELAY);
     radio::Links::get().max_links = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;

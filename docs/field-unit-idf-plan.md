@@ -256,6 +256,14 @@ field-idf/
      scan runs.
 6. **Later: status screen** on the GC9A01A (small framebuffer driver, or
    LVGL): app unit link, devices heard, link states.
+   - 2026-11-08 (working on the field board; previewed on the host first):
+     `components/screen` drives the panel through esp_lcd's SPI panel IO
+     with the MicroPython driver's init sequence, draws in 24-row bands
+     (11.5 KB DMA buffer, no framebuffer), uses the MicroPython unit's
+     `fonts/med.bin` and `small.bin`, and redraws only on change. Content:
+     app unit (or the setup network to join), IP, devices heard, one line
+     per link (`up`/`conn`/`down`), "+N more" when they don't fit. Pins and
+     brightness in Kconfig (Waveshare defaults).
 
 ## Changes outside `field-idf/`
 
