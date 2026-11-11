@@ -1,6 +1,7 @@
 #include "screen.h"
 
-#include <cmath>
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #include "driver/gpio.h"
@@ -13,133 +14,28 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "sdkconfig.h"
 
+extern const uint8_t font_big_start[] asm("_binary_big_bin_start");
+extern const uint8_t font_mid_start[] asm("_binary_mid_bin_start");
 extern const uint8_t font_med_start[] asm("_binary_med_bin_start");
 extern const uint8_t font_small_start[] asm("_binary_small_bin_start");
 
 namespace screen {
 
+namespace sd = screen_draw;
+
 static const char *TAG = "screen";
-static constexpr int W = 240, H = 240;
+static constexpr int W = sd::W, H = sd::H;
 static constexpr int kBand = 24;           // rows per SPI transfer (11.5 KB buffer)
 
-// -- fonts (tools/make_font.py: "MNF1", height, -, count u16, then
-//    count x (code u16, width u8, -, offset u32), MONO_HLSB bitmaps) -----------
-
-struct Font {
-    const uint8_t *data = nullptr;
-    int height = 0, count = 0;
-
-    explicit Font(const uint8_t *d) : data(d)
-    {
-        if (memcmp(d, "MNF1", 4) == 0) {
-            height = d[4];
-            count = d[6] | d[7] << 8;
-        }
-    }
-    // Glyph width and bitmap, or width 0 when the font lacks the character.
-    int glyph(char ch, const uint8_t **bits) const
-    {
-        const uint8_t *e = data + 8;
-        for (int i = 0; i < count; i++, e += 8) {
-            if ((e[0] | e[1] << 8) == (uint8_t)ch) {
-                uint32_t off = e[4] | e[5] << 8 | e[6] << 16 | (uint32_t)e[7] << 24;
-                *bits = data + 8 + 8 * count + off;
-                return e[2];
-            }
-        }
-        return 0;
-    }
-    int width(const std::string &s) const
-    {
-        int w = 0;
-        const uint8_t *b;
-        for (char c : s) w += glyph(c, &b);
-        return w;
-    }
-};
-
-static Font *g_med, *g_small;
-
-// -- layout ---------------------------------------------------------------------------
-
-struct Item {
-    const Font *font;
-    std::string text;
-    int x, y;
-    uint16_t color;      // RGB565, byte-swapped for the panel (big-endian on the wire)
-};
-
-static constexpr uint16_t rgb(int r, int g, int b)
+const sd::Fonts &fonts()
 {
-    uint16_t v = (r & 0xF8) << 8 | (g & 0xFC) << 3 | b >> 3;
-    return v << 8 | v >> 8;
+    static sd::Font big(font_big_start), mid(font_mid_start), med(font_med_start), small(font_small_start);
+    static sd::Fonts f{&big, &mid, &med, &small};
+    return f;
 }
 
-static constexpr uint16_t kWhite = rgb(255, 255, 255), kDim = rgb(160, 160, 160),
-                          kAccent = rgb(120, 170, 255);
-
-// Usable width of the round panel across rows y..y+h (as screen.py's chord).
-static int chord(int y, int h)
-{
-    int d = std::max(std::abs(y - 120), std::abs(y + h - 120));
-    if (d >= 120) return 0;
-    return (int)(2 * std::sqrt(120.0 * 120 - d * d)) - 12;
-}
-
-static Item centred(const Font &f, std::string text, int y, uint16_t color)
-{
-    int lim = chord(y, f.height);
-    while (!text.empty() && f.width(text) > lim) text.pop_back();
-    return {&f, text, 120 - f.width(text) / 2, y, color};
-}
-
-// Title, then the lines top to bottom while they fit the circle; when some
-// are left over, the last one shown becomes "+N more".
-static std::vector<Item> layout(const Content &c)
-{
-    std::vector<Item> items;
-    items.push_back(centred(*g_med, c.title, 34, kAccent));
-    int y = 72;
-    size_t i = 0;
-    for (; i < c.lines.size() && y + g_small->height <= 216; i++) {
-        const Font &f = i == 0 && g_med->width(c.lines[i]) <= chord(y, g_med->height) ? *g_med
-                                                                                      : *g_small;
-        items.push_back(centred(f, c.lines[i], y, i == 0 ? kWhite : kDim));
-        y += f.height + (i == 0 ? 10 : 6);
-    }
-    if (i < c.lines.size() && items.size() > 2) {
-        Item &last = items.back();
-        last = centred(*last.font, "+" + std::to_string(c.lines.size() - i + 1) + " more", last.y,
-                       kDim);
-    }
-    return items;
-}
-
-// Draws the parts of `items` that fall in rows y0..y0+kBand into `buf`.
-static void raster(const std::vector<Item> &items, int y0, uint16_t *buf)
-{
-    memset(buf, 0, W * kBand * 2);
-    for (const auto &it : items) {
-        int h = it.font->height;
-        if (it.y >= y0 + kBand || it.y + h <= y0) continue;
-        int x = it.x;
-        for (char ch : it.text) {
-            const uint8_t *bits;
-            int gw = it.font->glyph(ch, &bits);
-            int stride = (gw + 7) / 8;
-            for (int row = std::max(0, y0 - it.y); row < h && it.y + row < y0 + kBand; row++) {
-                uint16_t *line = buf + (it.y + row - y0) * W;
-                const uint8_t *src = bits + row * stride;
-                for (int col = 0; col < gw; col++)
-                    if (x + col >= 0 && x + col < W && (src[col >> 3] & (0x80 >> (col & 7))))
-                        line[x + col] = it.color;
-            }
-            x += gw;
-        }
-    }
-}
+static core::Pins g_pins;
 
 // -- GC9A01A over SPI (init sequence from display.py / TFT_eSPI) ----------------------
 
@@ -174,8 +70,10 @@ static const Cmd kInit[] = {
     {0x67, "\x00\x3C\x00\x00\x00\x01\x54\x10\x32\x98", 10, 0},
     {0x74, "\x10\x85\x80\x00\x00\x4E\x00", 7, 0}, {0x98, "\x3E\x07", 2, 0},
     {0x35, "", 0, 0}, {0x21, "", 0, 0}, {0x11, "", 0, 120}, {0x29, "", 0, 20},
-    {0x36, "\x08", 1, 0},                  // MADCTL: rotation 0, BGR panel
 };
+
+// MADCTL per rotation (BGR panel), from the TFT_eSPI GC9A01 driver.
+static const uint8_t kMadctl[4] = {0x08, 0x68, 0xC8, 0xA8};
 
 static bool on_done(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event_data_t *, void *)
 {
@@ -187,64 +85,85 @@ static bool on_done(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event_data_t *, 
 static bool panel_init()
 {
     spi_bus_config_t bus = {};
-    bus.mosi_io_num = CONFIG_MEATNET_SCREEN_MOSI;
+    bus.mosi_io_num = g_pins.mosi;
     bus.miso_io_num = -1;
-    bus.sclk_io_num = CONFIG_MEATNET_SCREEN_SCK;
+    bus.sclk_io_num = g_pins.sck;
     bus.quadwp_io_num = -1;
     bus.quadhd_io_num = -1;
     bus.max_transfer_sz = W * kBand * 2;
-    if (spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO) != ESP_OK) return false;
+    spi_host_device_t host = g_pins.spi == 3 ? SPI3_HOST : SPI2_HOST;
+    if (spi_bus_initialize(host, &bus, SPI_DMA_CH_AUTO) != ESP_OK) return false;
     esp_lcd_panel_io_spi_config_t io = {};
-    io.cs_gpio_num = CONFIG_MEATNET_SCREEN_CS;
-    io.dc_gpio_num = CONFIG_MEATNET_SCREEN_DC;
+    io.cs_gpio_num = g_pins.cs;
+    io.dc_gpio_num = g_pins.dc;
     io.spi_mode = 0;
-    io.pclk_hz = 40 * 1000 * 1000;
+    io.pclk_hz = std::min(g_pins.baud, 40 * 1000 * 1000);    // these pins go through the GPIO matrix
     io.trans_queue_depth = 4;
     io.on_color_trans_done = on_done;
     io.lcd_cmd_bits = 8;
     io.lcd_param_bits = 8;
-    if (esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io, &g_io) != ESP_OK)
+    if (esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)host, &io, &g_io) != ESP_OK)
         return false;
-#if CONFIG_MEATNET_SCREEN_RST >= 0
-    gpio_set_direction((gpio_num_t)CONFIG_MEATNET_SCREEN_RST, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)CONFIG_MEATNET_SCREEN_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_set_level((gpio_num_t)CONFIG_MEATNET_SCREEN_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_set_level((gpio_num_t)CONFIG_MEATNET_SCREEN_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(120));
-#endif
+    if (g_pins.rst >= 0) {
+        gpio_num_t rst = static_cast<gpio_num_t>(g_pins.rst);
+        gpio_set_direction(rst, GPIO_MODE_OUTPUT);
+        gpio_set_level(rst, 1);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level(rst, 0);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level(rst, 1);
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
     for (const auto &c : kInit) {
         esp_lcd_panel_io_tx_param(g_io, c.cmd, c.len ? c.data : nullptr, c.len);
         if (c.delay_ms) vTaskDelay(pdMS_TO_TICKS(c.delay_ms));
     }
+    uint8_t madctl = kMadctl[g_pins.rotation & 3];
+    esp_lcd_panel_io_tx_param(g_io, 0x36, &madctl, 1);
     return true;
 }
 
 static void backlight(int pct)
 {
-#if CONFIG_MEATNET_SCREEN_BL >= 0
-    ledc_timer_config_t t = {};
-    t.speed_mode = LEDC_LOW_SPEED_MODE;
-    t.duty_resolution = LEDC_TIMER_10_BIT;
-    t.timer_num = LEDC_TIMER_0;
-    t.freq_hz = 5000;
-    t.clk_cfg = LEDC_AUTO_CLK;
-    ledc_timer_config(&t);
-    ledc_channel_config_t ch = {};
-    ch.gpio_num = CONFIG_MEATNET_SCREEN_BL;
-    ch.speed_mode = LEDC_LOW_SPEED_MODE;
-    ch.channel = LEDC_CHANNEL_0;
-    ch.timer_sel = LEDC_TIMER_0;
-    ch.duty = 1023 * pct / 100;
-    ledc_channel_config(&ch);
-#endif
+    if (g_pins.bl < 0) return;
+    static bool ready = false;
+    if (!ready) {
+        ledc_timer_config_t t = {};
+        t.speed_mode = LEDC_LOW_SPEED_MODE;
+        t.duty_resolution = LEDC_TIMER_10_BIT;
+        t.timer_num = LEDC_TIMER_0;
+        t.freq_hz = 5000;
+        t.clk_cfg = LEDC_AUTO_CLK;
+        ledc_timer_config(&t);
+        ledc_channel_config_t ch = {};
+        ch.gpio_num = g_pins.bl;
+        ch.speed_mode = LEDC_LOW_SPEED_MODE;
+        ch.channel = LEDC_CHANNEL_0;
+        ch.timer_sel = LEDC_TIMER_0;
+        ledc_channel_config(&ch);
+        ready = true;
+    }
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 1023 * std::max(0, std::min(100, pct)) / 100);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
-static void draw(const std::vector<Item> &items, uint16_t *buf)
+static void panel_sleep(bool on)
+{
+    if (on) {
+        esp_lcd_panel_io_tx_param(g_io, 0x28, nullptr, 0);     // display off
+        esp_lcd_panel_io_tx_param(g_io, 0x10, nullptr, 0);     // sleep in
+        vTaskDelay(pdMS_TO_TICKS(5));
+    } else {
+        esp_lcd_panel_io_tx_param(g_io, 0x11, nullptr, 0);     // sleep out
+        vTaskDelay(pdMS_TO_TICKS(120));
+        esp_lcd_panel_io_tx_param(g_io, 0x29, nullptr, 0);     // display on
+    }
+}
+
+static void draw(const std::vector<sd::Prim> &prims, uint16_t *buf)
 {
     for (int y0 = 0; y0 < H; y0 += kBand) {
-        raster(items, y0, buf);
+        sd::raster(prims, y0, kBand, buf);
         uint8_t ca[4] = {0, 0, (W - 1) >> 8, (W - 1) & 0xFF};
         uint8_t ra[4] = {(uint8_t)(y0 >> 8), (uint8_t)y0, (uint8_t)((y0 + kBand - 1) >> 8),
                          (uint8_t)(y0 + kBand - 1)};
@@ -257,7 +176,12 @@ static void draw(const std::vector<Item> &items, uint16_t *buf)
 
 // -- task -------------------------------------------------------------------------------
 
-static std::function<Content()> g_content;
+static std::function<sd::View()> g_view;
+static std::atomic<int> g_brightness{80};
+static std::atomic<bool> g_sleep{false};
+
+void set_brightness(int pct) { g_brightness = pct; }
+void set_sleep(bool on) { g_sleep = on; }
 
 static void task(void *)
 {
@@ -267,34 +191,50 @@ static void task(void *)
         vTaskDelete(nullptr);
         return;
     }
-    Content shown;
-    bool first = true;
+    sd::View shown;
+    bool first = true, asleep = false;
+    int lit = -1;
     while (true) {
-        Content c = g_content();
-        if (first || !(c == shown)) {
-            draw(layout(c), buf);
-            if (first) backlight(CONFIG_MEATNET_SCREEN_BRIGHTNESS);   // after the first frame
-            shown = c;
+        if (g_sleep) {
+            if (!asleep) {
+                asleep = true;
+                backlight(0);
+                panel_sleep(true);
+                lit = -1;
+            }
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+        if (asleep) {
+            asleep = false;
+            panel_sleep(false);
+            first = true;                 // the panel's RAM may be lost: redraw
+        }
+        sd::View v = g_view();
+        if (first || !(v == shown)) {
+            draw(sd::draw(fonts(), v), buf);
+            shown = std::move(v);
             first = false;
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (g_brightness != lit) {        // after the first frame, so no garbage shows
+            lit = g_brightness;
+            backlight(lit);
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
-void start(std::function<Content()> content)
+void start(const core::Pins &pins, std::function<sd::View()> view)
 {
-#if CONFIG_MEATNET_SCREEN
-    static Font med(font_med_start), small(font_small_start);
-    if (!med.height || !small.height) {
+    const sd::Fonts &f = fonts();
+    if (!f.big->ok() || !f.mid->ok() || !f.med->ok() || !f.small->ok()) {
         ESP_LOGE(TAG, "bad font data");
         return;
     }
-    g_med = &med;
-    g_small = &small;
+    g_pins = pins;
     g_done = xSemaphoreCreateBinary();
-    g_content = content;
+    g_view = std::move(view);
     xTaskCreate(task, "screen", 4096, nullptr, 3, nullptr);
-#endif
 }
 
 }  // namespace screen

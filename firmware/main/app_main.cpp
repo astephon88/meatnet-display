@@ -12,6 +12,9 @@
 #include <string>
 
 #include "cJSON.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
 #include "esp_coexist.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -41,6 +44,8 @@
 #include "log_ring.h"
 #include "node.h"
 #include "peripheral.h"
+#include "power.h"
+#include "readings.h"
 #include "settings.h"
 #include "split.h"
 #include "status.h"
@@ -100,7 +105,9 @@ static int log_hook(const char *fmt, va_list args)
     // Only whole log lines ("I (1234) tag: message"); the WiFi driver also
     // prints fragments of its own.
     const char *tag = strstr(line, ") ");
-    bool skip = !tag || !strchr("EWIDV", line[0]) || line[1] != ' ' || line[2] != '(';
+    const char *colon = tag ? strchr(tag, ':') : nullptr;
+    bool skip = !colon || !strchr("EWIDV", line[0]) || line[1] != ' ' || line[2] != '(' ||
+                strspn(colon + 1, " \r\n") == strlen(colon + 1);    // nothing after "tag:"
     if (!skip && line[0] == 'I') {
         for (const char *q : quiet) {
             size_t n = strlen(q);
@@ -376,7 +383,50 @@ static NodeStatus node_status()
 
 static void node_log(const std::string &m) { ESP_LOGI("node", "%s", m.c_str()); }
 
-static void publish(core::Node &node, core::Transport &t)
+// The battery divider's pin in microvolts (ADC1 with curve-fitting
+// calibration), or nothing when there is no battery pin.
+static std::optional<double> battery_uv()
+{
+    static adc_oneshot_unit_handle_t unit;
+    static adc_cali_handle_t cali;
+    static adc_channel_t ch;
+    static int state = 0;               // 0 = not set up yet, 1 = ready, -1 = unavailable
+    if (state == 0) {
+        state = -1;
+        adc_unit_t id;
+        if (g_cfg.battery_pin < 0) return std::nullopt;
+        if (adc_oneshot_io_to_channel(g_cfg.battery_pin, &id, &ch) != ESP_OK || id != ADC_UNIT_1) {
+            ESP_LOGW(TAG, "battery pin %d has no ADC1 channel", g_cfg.battery_pin);
+            return std::nullopt;
+        }
+        adc_oneshot_unit_init_cfg_t uc = {};
+        uc.unit_id = id;
+        adc_oneshot_chan_cfg_t cc = {};
+        cc.atten = ADC_ATTEN_DB_12;
+        cc.bitwidth = ADC_BITWIDTH_DEFAULT;
+        adc_cali_curve_fitting_config_t kc = {};
+        kc.unit_id = id;
+        kc.chan = ch;
+        kc.atten = ADC_ATTEN_DB_12;
+        kc.bitwidth = ADC_BITWIDTH_DEFAULT;
+        if (adc_oneshot_new_unit(&uc, &unit) != ESP_OK || adc_oneshot_config_channel(unit, ch, &cc) != ESP_OK ||
+            adc_cali_create_scheme_curve_fitting(&kc, &cali) != ESP_OK) {
+            ESP_LOGW(TAG, "battery ADC unavailable");
+            return std::nullopt;
+        }
+        state = 1;
+    }
+    int raw, mv;
+    if (state != 1 || adc_oneshot_read(unit, ch, &raw) != ESP_OK || adc_cali_raw_to_voltage(cali, raw, &mv) != ESP_OK)
+        return std::nullopt;
+    return mv * 1000.0;
+}
+
+// The web page's standby button, carried out by the node task.
+static std::atomic<int> g_power_req{0};     // 1 = standby, 2 = wake
+static std::atomic<uint32_t> g_published{0};
+
+static void publish(core::Node &node, core::Transport &t, const core::PowerManager &pm)
 {
     NodeStatus st;
     st.phones = static_cast<int>(t.inbound.size());
@@ -394,12 +444,16 @@ static void publish(core::Node &node, core::Transport &t)
         st.field_max_conn = g_remote->max_conn;
     }
     cJSON *o = core::node_status(node, core::ticks_ms());
+    cJSON_AddItemToObject(o, "power", pm.status(core::ticks_ms()));
     char *text = cJSON_PrintUnformatted(o);
     cJSON_Delete(o);
     st.json = text ? text : "{}";
     cJSON_free(text);
-    std::lock_guard<std::mutex> g(g_status_mu);
-    g_status = std::move(st);
+    {
+        std::lock_guard<std::mutex> g(g_status_mu);
+        g_status = std::move(st);
+    }
+    g_published++;
 }
 
 static void node_task(void *)
@@ -415,8 +469,21 @@ static void node_task(void *)
                                          standalone ? [] { return radio::Links::get().active(); }
                                                     : static_cast<size_t (*)()>(nullptr));
     core::Node node(*t, g_cfg, g_serial, node_log, &g_link_table);
+    core::PowerManager::Hooks hooks;
+    hooks.read_uv = battery_uv;
+    hooks.apply = [](bool on) {
+        screen::set_sleep(on);
+        esp_wifi_set_ps(on ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM);
+    };
+    hooks.persist = settings::set_standby;
+    core::PowerManager pm(g_cfg, *t, node, hooks, node_log, core::ticks_ms());
     ESP_LOGI(TAG, "MeatNet node %s running (%s)", g_serial.c_str(), g_role.c_str());
     for (int n = 0;; n++) {
+        if (int req = g_power_req.exchange(0)) {
+            if (req == 1) pm.enter("manual", core::ticks_ms());
+            else pm.exit("manual", core::ticks_ms());
+            publish(node, *t, pm);
+        }
         // Changes from the web page apply at once, as in web.py (the ones
         // marked "reboot" only matter at the next start).
         if (g_cfg_changed.exchange(false)) {
@@ -429,7 +496,8 @@ static void node_task(void *)
         if (n % 5 == 0) t->rotate_advertisement();
         if (n % 10 == 0) {
             node.tick();
-            publish(node, *t);
+            pm.tick(core::ticks_ms());
+            publish(node, *t, pm);
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -532,7 +600,7 @@ static cJSON *state_json()
     cJSON_AddNumberToObject(o, "heap", esp_get_free_heap_size());
     cJSON_AddNumberToObject(o, "uptime", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddStringToObject(o, "display", "GC9A01A 240x240");
-    cJSON_AddNullToObject(o, "power");
+    if (!cJSON_GetObjectItem(o, "power")) cJSON_AddNullToObject(o, "power");
     cJSON *sp = cJSON_AddObjectToObject(o, "split");
     if (g_role == "field") {
         bool up = g_client && g_client->connected();
@@ -557,54 +625,66 @@ static cJSON *state_json()
     return o;
 }
 
-static screen::Content screen_content()
+// The round screen: readings pages (app and standalone), or the field unit's
+// status page. Runs on the screen task.
+static screen_draw::View screen_view()
 {
-    screen::Content c;
-    if (g_role != "field") {
-        NodeStatus st = node_status();
-        std::string ap = get_net(g_setup_ap), ip = get_net(g_ip);
-        c.title = g_role == "app" ? "App unit" : "Display";
-        if (!ap.empty()) {
-            c.lines = {"Join WiFi", ap};
-        } else {
-            if (g_role == "app")
-                c.lines.push_back(st.field_connected ? "field " + st.field_peer : "field unit offline");
-            c.lines.push_back(ip.empty() ? "WiFi connecting" : ip);
-        }
-        c.lines.push_back("phones " + std::to_string(st.phones));
-        c.lines.push_back(std::to_string(st.probes) + (st.probes == 1 ? " probe, " : " probes, ") +
-                          std::to_string(st.devices) + (st.devices == 1 ? " device" : " devices"));
-        return c;
-    }
-    c.title = "Field unit";
+    static int page = 0;
+    static int64_t page_at = 0;
+    core::Settings cfg = settings::get();
     std::string ap = get_net(g_setup_ap), ip = get_net(g_ip);
-    if (!ap.empty()) {
-        c.lines.push_back("Join WiFi");
-        c.lines.push_back(ap);
-        char url[32];
-        snprintf(url, sizeof(url), "http://" IPSTR "/", IP2STR(&g_ap_ip.ip));
-        c.lines.push_back(url);
-    } else {
+    std::string mode = !ap.empty() ? "ap" : !ip.empty() ? "sta" : "connecting";
+    char ap_ip[16];
+    snprintf(ap_ip, sizeof(ap_ip), IPSTR, IP2STR(&g_ap_ip.ip));
+    std::string shown_ip = !ap.empty() ? ap_ip : ip;
+    std::vector<readings::Item> items;
+    if (g_role == "field") {
+        cJSON *st = field_json();
+        int ready = 0;
+        const cJSON *l;
+        cJSON_ArrayForEach(l, cJSON_GetObjectItem(st, "links"))
+            if (strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(l, "state")), "ready") == 0) ready++;
         bool up = g_client && g_client->connected();
-        c.lines.push_back(up ? "app " + g_client->peer() : "app unit offline");
-        c.lines.push_back(ip.empty() ? "WiFi connecting" : ip);
+        std::vector<std::string> lines = {
+            up ? "app unit " + g_client->peer() : "app unit offline",
+            "links " + std::to_string(ready) + "  probes " +
+                std::to_string(cJSON_GetArraySize(cJSON_GetObjectItem(st, "probes"))),
+            "devices " + std::to_string(cJSON_GetArraySize(cJSON_GetObjectItem(st, "devices"))) + "  MEATERs " +
+                std::to_string(cJSON_GetArraySize(cJSON_GetObjectItem(st, "meaters")))};
+        items.push_back(readings::status_item(st, mode, shown_ip, ap, "Field unit", &lines));
+        cJSON_Delete(st);
+    } else {
+        NodeStatus ns = node_status();
+        cJSON *st = cJSON_Parse(ns.json.c_str());
+        if (!st) st = cJSON_CreateObject();
+        items = readings::build_items(cfg, st, mode, shown_ip, ap);
+        if (g_role == "app")
+            for (auto &i : items)
+                if (i.status) i.subs.insert(i.subs.begin() + 1, ns.field_connected ? "field " + ns.field_peer
+                                                                                   : "field unit offline");
+        cJSON_Delete(st);
     }
-    auto links = radio::Links::get().collect_brief();
-    radio::Radio &r = radio::Radio::get();
-    r.lock();
-    size_t probes = r.direct.size(), nodes = r.nodes.size(), meaters = r.meaters.size();
-    r.unlock();
-    std::string heard = "heard " + std::to_string(probes) + (probes == 1 ? " probe, " : " probes, ") +
-                        std::to_string(nodes) + (nodes == 1 ? " node" : " nodes");
-    c.lines.push_back(heard);
-    if (meaters) c.lines.push_back("heard " + std::to_string(meaters) + (meaters == 1 ? " MEATER" : " MEATERs"));
-    for (auto &l : links) {
-        if (!ap.empty()) break;               // setup mode: no app unit, so no links
-        const char *st = l.state == "ready" ? "up"
-                       : l.state == "connecting" || l.state == "discovering" ? "conn" : "down";
-        c.lines.push_back(link_name(l) + " " + st);
+    screen::set_brightness(cfg.brightness);
+    auto pages = readings::pages(cfg, items);
+    screen_draw::View v;
+    if (pages.empty()) {
+        v.message = true;
+        v.text = "Waiting for";
+        v.sub = "MeatNet devices";
+        return v;
     }
-    return c;
+    int64_t now = core::ticks_ms();
+    if (now - page_at >= cfg.rotate_s * 1000LL) {
+        page_at = now;
+        page++;
+    }
+    page %= static_cast<int>(pages.size());
+    v.layout = cfg.layout;
+    v.unit = cfg.unit;
+    v.page = page;
+    v.total = static_cast<int>(pages.size());
+    v.items = pages[page];
+    return v;
 }
 
 static void split_start()
@@ -660,8 +740,21 @@ extern "C" void app_main(void)
     h.state = state_json;
     h.config_changed = [] { g_cfg_changed = true; };
     h.log = &g_log;
+    h.power = [](bool standby) -> cJSON * {
+        if (g_role == "field") return nullptr;
+        uint32_t seen = g_published;
+        g_power_req = standby ? 1 : 2;
+        for (int i = 0; i < 20 && g_published == seen; i++) vTaskDelay(pdMS_TO_TICKS(50));
+        cJSON *st = cJSON_Parse(node_status().json.c_str());
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddBoolToObject(o, "ok", true);
+        cJSON *pw = st ? cJSON_DetachItemFromObject(st, "power") : nullptr;
+        cJSON_AddItemToObject(o, "power", pw ? pw : cJSON_CreateNull());
+        cJSON_Delete(st);
+        return o;
+    };
     web::start(h, g_ap_ip.ip.addr);
-    screen::start(screen_content);
+    if (g_cfg.screen) screen::start(g_cfg.pins, screen_view);
     ble_start();
     xEventGroupWaitBits(g_events, kBleReady, pdFALSE, pdTRUE, portMAX_DELAY);
     radio::Links::get().max_links = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;

@@ -149,6 +149,14 @@ bool update(const cJSON *obj, std::string &err, bool &reboot)
     return true;
 }
 
+void set_standby(bool on)
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    core::Settings s = g;
+    s.standby = on;
+    if (save(s)) g = s;
+}
+
 void adopt_wifi(const std::string &ssid, const std::string &password)
 {
     std::lock_guard<std::mutex> lk(g_mu);

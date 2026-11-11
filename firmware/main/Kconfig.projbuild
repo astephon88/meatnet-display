@@ -49,37 +49,5 @@ menu "MeatNet field unit"
             bool "Prefer WiFi"
     endchoice
 
-    config MEATNET_SCREEN
-        bool "Status screen on a GC9A01A round LCD"
-        default y
-        help
-            App unit link, WiFi, links and devices heard. Pins default to the
-            Waveshare ESP32-S3-LCD-1.28 (non-touch); check your board's
-            schematic otherwise.
-
-    if MEATNET_SCREEN
-        config MEATNET_SCREEN_SCK
-            int "Screen SPI clock pin"
-            default 10
-        config MEATNET_SCREEN_MOSI
-            int "Screen SPI data (MOSI) pin"
-            default 11
-        config MEATNET_SCREEN_DC
-            int "Screen data/command pin"
-            default 8
-        config MEATNET_SCREEN_CS
-            int "Screen chip-select pin"
-            default 9
-        config MEATNET_SCREEN_RST
-            int "Screen reset pin (-1 = none)"
-            default 12
-        config MEATNET_SCREEN_BL
-            int "Screen backlight pin (-1 = none)"
-            default 40
-        config MEATNET_SCREEN_BRIGHTNESS
-            int "Backlight brightness (%)"
-            range 0 100
-            default 80
-    endif
 
 endmenu

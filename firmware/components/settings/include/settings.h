@@ -25,6 +25,9 @@ cJSON *to_json();
 // `reboot`: some changed key only takes effect after a restart.
 bool update(const cJSON *obj, std::string &err, bool &reboot);
 
+// Remembers a manual standby across restarts (the power manager).
+void set_standby(bool on);
+
 // Adopts WiFi credentials stored by the WiFi driver (from builds that set
 // them in Kconfig) when none are saved here yet.
 void adopt_wifi(const std::string &ssid, const std::string &password);

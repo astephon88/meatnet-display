@@ -9,3 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_subdirectory(core)
 enable_testing()
 add_subdirectory(tests)
+
+add_executable(screen_preview tools/screen_preview.cpp)
+target_link_libraries(screen_preview meatnet_core)
+target_compile_definitions(screen_preview PRIVATE MEATNET_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
