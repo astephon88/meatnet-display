@@ -5,4 +5,4 @@ set(CORE_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../core)
 file(GLOB CORE_SRCS ${CORE_DIR}/src/*.cpp)
 idf_component_register(SRCS ${CORE_SRCS}
                        INCLUDE_DIRS ${CORE_DIR}/include
-                       REQUIRES json)
+                       REQUIRES json lwip pthread)

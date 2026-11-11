@@ -33,7 +33,8 @@
 #include "radio.h"
 #include "screen.h"
 #include "settings.h"
-#include "split_client.h"
+#include "field_source.h"
+#include "split.h"
 #include "web.h"
 
 static const char *TAG = "field";
@@ -289,7 +290,7 @@ static void wifi_start()
 // -- main ---------------------------------------------------------------------------
 
 // /api/state for the web page.
-static split::Client *g_client = nullptr;
+static split::SplitClient *g_client = nullptr;
 
 static cJSON *state_json()
 {
@@ -377,15 +378,22 @@ static void split_start()
     const settings::Settings &s = settings::get();
     if (s.split_key.empty())
         ESP_LOGW(TAG, "no shared key set: the app unit will refuse us (set it on the web page)");
-    split::Config cfg;
+    split::ClientConfig cfg;
     cfg.peer = s.split_peer;
     cfg.key = s.split_key;
     cfg.port = s.split_port;
     cfg.serial = g_serial;
     cfg.max_conn = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
     cfg.mac = radio::Radio::get().address();
-    g_client = new split::Client(cfg);
-    g_client->start();
+    cfg.impl = "idf";
+    static radio::FieldSource source;
+    static split::FieldRadio fradio(source);
+    // Messages come prefixed "[split] "; ESP-IDF's tag says that already.
+    g_client = new split::SplitClient(fradio, cfg, [](const std::string &m) {
+        ESP_LOGI("split", "%s", m.compare(0, 8, "[split] ") == 0 ? m.c_str() + 8 : m.c_str());
+    });
+    xTaskCreate([](void *c) { static_cast<split::SplitClient *>(c)->run(); }, "split", 8192, g_client,
+                5, nullptr);
     ESP_LOGI(TAG, "app unit: %s, port %d",
              cfg.peer.empty() ? "find by beacon" : cfg.peer.c_str(), cfg.port);
 }

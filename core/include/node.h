@@ -28,7 +28,7 @@
 #include "linktable.h"
 #include "meater.h"
 #include "protocol.h"
-#include "settings.h"
+#include "unit_settings.h"
 #include "transport.h"
 #include "util.h"
 
