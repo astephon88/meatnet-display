@@ -21,6 +21,10 @@ struct Settings {
     int peer_latency_max;
     std::string coex;               // "bt", "balance" or "wifi"
     std::string ap_password;        // secret; setup network, "" = open
+    std::string role;               // "field", "app" or "standalone"
+    // The node's settings (app and standalone roles; config.json format,
+    // secrets left out): core::Settings is loaded from it.
+    std::string node_json;
 };
 
 void load();
@@ -32,7 +36,8 @@ cJSON *to_json();
 
 // Applies the fields present in `obj`, validates them and saves them to NVS.
 // Secrets: a missing wifi_password or ap_password keeps the saved one
-// ("" = open network); a missing or empty split_key keeps the saved one. Returns false with `err`
+// ("" = open network); a missing or empty split_key keeps the saved one. A
+// "node" object merges into node_json. Returns false with `err`
 // set when a value is invalid; nothing is saved then.
 bool update(const cJSON *obj, std::string &err);
 

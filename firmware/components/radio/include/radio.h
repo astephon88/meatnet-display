@@ -48,6 +48,9 @@ public:
     // Never report the app unit's own advertisements back to it.
     void set_ignore(const std::string &mac_display, const std::string &serial10);
 
+    // Scanning at all: off on an app unit, whose devices are the field unit's.
+    void set_scan_enabled(bool on) { scan_enabled_ = on; }
+
     // Scan mode, as commanded by the app unit.
     void set_scan_active(bool on);
     void set_standby(bool on);
@@ -78,6 +81,7 @@ private:
     bool scanning_ = false;
     int duty_ = 50;
     bool scan_active_ = false;
+    bool scan_enabled_ = true;
     bool standby_ = false;
     uint32_t adverts_ = 0;
 };

@@ -563,15 +563,20 @@ int Links::gap_event(::ble_gap_event *event, void *arg)
         struct ble_gap_upd_params *self = event->conn_update_req.self_params;
         uint16_t lat_max = settings::get().peer_latency_max;
         if (self->latency > lat_max) self->latency = lat_max;
+        // A probe asks for 7.5-75 ms while the app reads its log; with the
+        // peripheral role (phones, adverts) also on the radio, the controller
+        // never carries out a 7.5 ms update. Offer the upper part of the range.
+        if (self->itvl_min < kItvlMin && self->itvl_max >= kItvlMin) self->itvl_min = kItvlMin;
         uint16_t floor = l->supervision();
         uint32_t min_valid = ((1u + self->latency) * self->itvl_max * 125u * 2u) / 1000u + 1u;
         if (self->supervision_timeout < floor) self->supervision_timeout = floor;
         if (self->supervision_timeout < min_valid) self->supervision_timeout = min_valid;
         ESP_LOGI(TAG, "%s %s asks for interval %.1f-%.1f ms, latency %u, timeout %u ms; "
-                      "using latency %u, timeout %u ms",
+                      "using %.1f-%.1f ms, latency %u, timeout %u ms",
                  l->kind.c_str(), proto::hex(l->key).c_str(), peer->itvl_min * 1.25,
                  peer->itvl_max * 1.25, peer->latency, peer->supervision_timeout * 10,
-                 self->latency, self->supervision_timeout * 10);
+                 self->itvl_min * 1.25, self->itvl_max * 1.25, self->latency,
+                 self->supervision_timeout * 10);
         l->asked = "";
         char asked[64];
         snprintf(asked, sizeof(asked), "%.1fms/%u/%ums", peer->itvl_max * 1.25, peer->latency,
@@ -585,6 +590,9 @@ int Links::gap_event(::ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "%s %s connection parameters now %s (%lldms after connecting)",
                      l->kind.c_str(), proto::hex(l->key).c_str(), l->params.c_str(),
                      (long long)(l->connected_at ? now - l->connected_at : 0));
+        } else {
+            ESP_LOGW(TAG, "%s %s connection parameter update failed (%d)", l->kind.c_str(),
+                     proto::hex(l->key).c_str(), event->conn_update.status);
         }
         break;
     case BLE_GAP_EVENT_NOTIFY_RX: {
@@ -696,6 +704,16 @@ bool Links::any_connected()
         if (kv.second->conn != BLE_HS_CONN_HANDLE_NONE) any = true;
     unlock();
     return any;
+}
+
+size_t Links::active()
+{
+    lock();
+    size_t n = 0;
+    for (auto &kv : links_)
+        if (kv.second->conn != BLE_HS_CONN_HANDLE_NONE || kv.second->state == "connecting") n++;
+    unlock();
+    return n;
 }
 
 bool Links::connecting()

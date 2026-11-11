@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "cJSON.h"
+#include "unit_settings.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "sdkconfig.h"
@@ -23,6 +24,8 @@ static Settings g = {
 #else
     "bt",
 #endif
+    "",
+    "field",                        // what units built before the role setting were
     "",
 };
 
@@ -59,6 +62,8 @@ void load()
     get_int(h, "lat_max", g.peer_latency_max);
     get_str(h, "coex", g.coex);
     get_str(h, "ap_pw", g.ap_password);
+    get_str(h, "role", g.role);
+    get_str(h, "node", g.node_json);
     nvs_close(h);
 }
 
@@ -78,6 +83,8 @@ static bool save(const Settings &s)
            && nvs_set_i32(h, "lat_max", s.peer_latency_max) == ESP_OK
            && nvs_set_str(h, "coex", s.coex.c_str()) == ESP_OK
            && nvs_set_str(h, "ap_pw", s.ap_password.c_str()) == ESP_OK
+           && nvs_set_str(h, "role", s.role.c_str()) == ESP_OK
+           && nvs_set_str(h, "node", s.node_json.c_str()) == ESP_OK
            && nvs_commit(h) == ESP_OK;
     nvs_close(h);
     return ok;
@@ -97,7 +104,11 @@ cJSON *to_json()
     cJSON_AddNumberToObject(o, "supervision_node_ms", g.supervision_node_ms);
     cJSON_AddNumberToObject(o, "peer_latency_max", g.peer_latency_max);
     cJSON_AddStringToObject(o, "coex", g.coex.c_str());
+    cJSON_AddStringToObject(o, "role", g.role.c_str());
     cJSON_AddBoolToObject(o, "ap_password_set", !g.ap_password.empty());
+    core::Settings node;
+    core::merge_settings(node, g.node_json);
+    cJSON_AddItemToObject(o, "node", core::settings_to_json(node, false));
     return o;
 }
 
@@ -142,8 +153,13 @@ bool update(const cJSON *obj, std::string &err)
         || !take_int(obj, "supervision_node_ms", 1000, 32000, s.supervision_node_ms, err)
         || !take_int(obj, "peer_latency_max", 0, 10, s.peer_latency_max, err)
         || !take_str(obj, "coex", 7, s.coex, err)
+        || !take_str(obj, "role", 10, s.role, err)
         || !take_str(obj, "ap_password", 63, ap_pw, err))
         return false;
+    if (s.role != "field" && s.role != "app" && s.role != "standalone") {
+        err = "role: field, app or standalone";
+        return false;
+    }
     if (s.coex != "bt" && s.coex != "balance" && s.coex != "wifi") {
         err = "coex: bt, balance or wifi";
         return false;
@@ -159,6 +175,17 @@ bool update(const cJSON *obj, std::string &err)
     // A blank split key in the form means "keep"; it can't be cleared to
     // nothing, since the app unit always checks it.
     if (!key.empty()) s.split_key = key;
+    const cJSON *node = cJSON_GetObjectItemCaseSensitive(obj, "node");
+    if (cJSON_IsObject(node)) {
+        core::Settings ns;
+        core::merge_settings(ns, s.node_json);
+        core::merge_settings(ns, node);
+        cJSON *j = core::settings_to_json(ns, false);
+        char *text = cJSON_PrintUnformatted(j);
+        cJSON_Delete(j);
+        s.node_json = text ? text : "";
+        cJSON_free(text);
+    }
     s.wifi_password = pw;
     s.ap_password = ap_pw;
     if (!save(s)) {

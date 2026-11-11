@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+struct cJSON;
+
 namespace core {
 
 struct MeaterProbe {
@@ -72,5 +74,17 @@ struct Settings {
     int peer_latency_max = 0;
     std::string coex = "bt";            // "bt", "balance" or "wifi"
 };
+
+// Merges the keys present in `obj` (config.json format) into `s`, as
+// config.load does: unknown keys and values of the wrong type are ignored,
+// "pins" merges key by key, and a single upstream_node string (older
+// settings) becomes a list.
+void merge_settings(Settings &s, const cJSON *obj);
+void merge_settings(Settings &s, const std::string &json);
+
+// All keys in config.json format. With `secrets` false, split_key,
+// wifi_password and ap_password become "<name>_set": true/false (web.py's
+// _SECRET).
+cJSON *settings_to_json(const Settings &s, bool secrets);
 
 }  // namespace core

@@ -71,6 +71,7 @@ public:
 
     bool any_connected();
     bool connecting();
+    size_t active();            // links connected or connecting (radio connections in use)
     uint32_t total_rx() const { return total_rx_; }
     size_t max_links = 6;
 

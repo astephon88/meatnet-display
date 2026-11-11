@@ -35,7 +35,7 @@ void Radio::on_ready()
 
 void Radio::restart_scan()
 {
-    if (!ready_) return;
+    if (!ready_ || !scan_enabled_) return;
     ble_gap_disc_cancel();          // fine if no scan is running
     uint8_t own_addr_type;
     if (ble_hs_id_infer_auto(0, &own_addr_type) != 0) {

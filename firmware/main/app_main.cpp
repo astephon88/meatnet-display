@@ -5,8 +5,10 @@
 // the split protocol. Settings are changed on the unit's web page; with no
 // WiFi set up (or none reachable) it also opens a setup network for that.
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 #include "cJSON.h"
@@ -33,7 +35,12 @@
 #include "radio.h"
 #include "screen.h"
 #include "settings.h"
+#include "esp_random.h"
+#include "esp_transport.h"
 #include "field_source.h"
+#include "linktable.h"
+#include "node.h"
+#include "peripheral.h"
 #include "split.h"
 #include "web.h"
 
@@ -65,9 +72,18 @@ static void host_task(void *)
     nimble_port_freertos_deinit();
 }
 
+static std::string g_role;          // "field", "app" or "standalone" (fixed until a reboot)
+static std::string g_serial;
+static core::Settings g_cfg;            // the node's settings (app and standalone roles)
+
 static void ble_start()
 {
+    // An app unit's devices are the field unit's: it never scans.
+    if (g_role == "app") radio::Radio::get().set_scan_enabled(false);
     ESP_ERROR_CHECK(nimble_port_init());
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
+    // Phones connect to app and standalone units (GATT before the host starts).
+    if (g_role != "field") periph::Peripheral::get().init(g_serial, g_cfg.dis_model, g_cfg.dis_firmware);
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
     nimble_port_freertos_init(host_task);
@@ -115,7 +131,6 @@ static constexpr int64_t kSetupRetryMs = 60000;
 static portMUX_TYPE g_net_mux = portMUX_INITIALIZER_UNLOCKED;
 static char g_ip[16] = "";
 static char g_setup_ap[33] = "";       // setup network's SSID while it is up
-static std::string g_serial;
 static esp_timer_handle_t g_ap_timer;
 static esp_timer_handle_t g_retry_timer;
 static std::atomic<int> g_ap_clients{0};
@@ -289,6 +304,88 @@ static void wifi_start()
 
 // -- main ---------------------------------------------------------------------------
 
+// -- app and standalone roles: the MeatNet node ----------------------------------------
+
+static core::LinkTable g_link_table;
+static esp::EspTransport *g_local = nullptr;
+static split::RemoteRadio *g_remote = nullptr;
+static split::SplitServer *g_server = nullptr;
+
+// What the web page and the screen show, published by the node task (they run
+// on other tasks and mustn't touch the Node's state).
+struct NodeStatus {
+    int phones = 0;
+    size_t probes = 0, devices = 0;
+    bool field_connected = false;
+    std::string field_peer;
+    int field_rtt_ms = -1;
+};
+static std::mutex g_status_mu;
+static NodeStatus g_status;
+
+static NodeStatus node_status()
+{
+    std::lock_guard<std::mutex> g(g_status_mu);
+    return g_status;
+}
+
+static void node_log(const std::string &m) { ESP_LOGI("node", "%s", m.c_str()); }
+
+static void node_task(void *)
+{
+    protocol::set_random_source([] { return static_cast<uint32_t>(esp_random()); });
+    bool standalone = g_role == "standalone";
+    g_local = new esp::EspTransport(standalone);
+    core::Transport *t = g_local;
+    if (!standalone) t = g_remote = new split::RemoteRadio(g_local, node_log);
+    // Standalone: phones and links share this radio's connections.
+    g_local->max_conn = std::min(g_cfg.max_conn, CONFIG_BT_NIMBLE_MAX_CONNECTIONS);
+    periph::Peripheral::get().set_limits(standalone ? g_local->max_conn : CONFIG_BT_NIMBLE_MAX_CONNECTIONS,
+                                         standalone ? [] { return radio::Links::get().active(); }
+                                                    : static_cast<size_t (*)()>(nullptr));
+    core::Node node(*t, g_cfg, g_serial, node_log, &g_link_table);
+    ESP_LOGI(TAG, "MeatNet node %s running (%s)", g_serial.c_str(), g_role.c_str());
+    for (int n = 0;; n++) {
+        node.service();
+        periph::Peripheral::get().service();
+        if (n % 5 == 0) t->rotate_advertisement();
+        if (n % 10 == 0) {
+            node.tick();
+            NodeStatus st;
+            st.phones = static_cast<int>(t->inbound.size());
+            st.probes = node.probes.size();
+            st.devices = node.devices.size();
+            if (g_remote) {
+                st.field_connected = g_remote->connected;
+                st.field_peer = g_remote->peer_serial;
+                st.field_rtt_ms = g_remote->rtt_ms;
+            }
+            std::lock_guard<std::mutex> g(g_status_mu);
+            g_status = st;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+// App unit: listen for the field unit (once WiFi is up).
+static void server_start()
+{
+    const settings::Settings &s = settings::get();
+    if (s.split_key.empty())
+        ESP_LOGW(TAG, "no shared key set: field units can't connect (set it on the web page)");
+    split::ServerConfig cfg;
+    cfg.key = s.split_key;
+    cfg.serial = g_serial;
+    cfg.mac = radio::Radio::get().address();
+    cfg.port = s.split_port;
+    g_server = new split::SplitServer(*g_remote, cfg, [](const std::string &m) {
+        ESP_LOGI("split", "%s", m.compare(0, 8, "[split] ") == 0 ? m.c_str() + 8 : m.c_str());
+    });
+    xTaskCreate([](void *sv) { static_cast<split::SplitServer *>(sv)->run(); }, "split", 8192, g_server,
+                5, nullptr);
+    ESP_LOGI(TAG, "listening for the field unit on port %d", cfg.port);
+}
+
 // /api/state for the web page.
 static split::SplitClient *g_client = nullptr;
 
@@ -297,16 +394,32 @@ static cJSON *state_json()
     radio::Radio &r = radio::Radio::get();
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "serial", g_serial.c_str());
+    cJSON_AddStringToObject(o, "role", g_role.c_str());
+    if (g_role != "field") {
+        NodeStatus st = node_status();
+        cJSON_AddNumberToObject(o, "phones", st.phones);
+        cJSON_AddNumberToObject(o, "probes", st.probes);
+        if (g_role == "app") {
+            cJSON *f = cJSON_AddObjectToObject(o, "field_unit");
+            cJSON_AddBoolToObject(f, "connected", st.field_connected);
+            if (st.field_connected) {
+                cJSON_AddStringToObject(f, "peer", st.field_peer.c_str());
+                cJSON_AddNumberToObject(f, "rtt_ms", st.field_rtt_ms);
+            }
+        }
+    }
     cJSON_AddStringToObject(o, "ip", get_net(g_ip).c_str());
     std::string ap = get_net(g_setup_ap);
     if (!ap.empty()) cJSON_AddStringToObject(o, "setup_ap", ap.c_str());
     cJSON_AddNumberToObject(o, "uptime_s", (double)(esp_timer_get_time() / 1000000));
-    cJSON *a = cJSON_AddObjectToObject(o, "app_unit");
-    bool up = g_client && g_client->connected();
-    cJSON_AddBoolToObject(a, "connected", up);
-    if (up) {
-        cJSON_AddStringToObject(a, "peer", g_client->peer().c_str());
-        cJSON_AddNumberToObject(a, "rtt_ms", g_client->rtt_ms());
+    if (g_role == "field") {
+        cJSON *a = cJSON_AddObjectToObject(o, "app_unit");
+        bool up = g_client && g_client->connected();
+        cJSON_AddBoolToObject(a, "connected", up);
+        if (up) {
+            cJSON_AddStringToObject(a, "peer", g_client->peer().c_str());
+            cJSON_AddNumberToObject(a, "rtt_ms", g_client->rtt_ms());
+        }
     }
     size_t ready = 0, total = 0;
     for (auto &l : radio::Links::get().collect_states()) {
@@ -342,6 +455,22 @@ static std::string link_name(const radio::LinkBrief &l)
 static screen::Content screen_content()
 {
     screen::Content c;
+    if (g_role != "field") {
+        NodeStatus st = node_status();
+        std::string ap = get_net(g_setup_ap), ip = get_net(g_ip);
+        c.title = g_role == "app" ? "App unit" : "Display";
+        if (!ap.empty()) {
+            c.lines = {"Join WiFi", ap};
+        } else {
+            if (g_role == "app")
+                c.lines.push_back(st.field_connected ? "field " + st.field_peer : "field unit offline");
+            c.lines.push_back(ip.empty() ? "WiFi connecting" : ip);
+        }
+        c.lines.push_back("phones " + std::to_string(st.phones));
+        c.lines.push_back(std::to_string(st.probes) + (st.probes == 1 ? " probe, " : " probes, ") +
+                          std::to_string(st.devices) + (st.devices == 1 ? " device" : " devices"));
+        return c;
+    }
     c.title = "Field unit";
     std::string ap = get_net(g_setup_ap), ip = get_net(g_ip);
     if (!ap.empty()) {
@@ -415,7 +544,9 @@ extern "C" void app_main(void)
     char serial[11];
     snprintf(serial, sizeof(serial), "%02X%02X%02X%02X%02X", mac[1], mac[2], mac[3], mac[4], mac[5]);
     g_serial = serial;
-    ESP_LOGI(TAG, "MeatNet field unit (ESP-IDF), serial %s", serial);
+    g_role = settings::get().role;
+    core::merge_settings(g_cfg, settings::get().node_json);
+    ESP_LOGI(TAG, "MeatNet %s unit (ESP-IDF), serial %s", g_role.c_str(), serial);
 
     wifi_start();
     web::start(state_json, g_ap_ip.ip.addr);
@@ -423,12 +554,15 @@ extern "C" void app_main(void)
     ble_start();
     xEventGroupWaitBits(g_events, kBleReady, pdFALSE, pdTRUE, portMAX_DELAY);
     radio::Links::get().max_links = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
-    xTaskCreate(radio_task, "radio", 6144, nullptr, 6, nullptr);
+    if (g_role != "app") xTaskCreate(radio_task, "radio", 6144, nullptr, 6, nullptr);
+    if (g_role != "field") xTaskCreate(node_task, "node", 12288, nullptr, 5, nullptr);
 
     radio::Radio &r = radio::Radio::get();
     for (int tick = 1;; tick++) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        if (!g_client && (xEventGroupGetBits(g_events) & kWifiUp)) split_start();
+        bool wifi = xEventGroupGetBits(g_events) & kWifiUp;
+        if (g_role == "field" && !g_client && wifi) split_start();
+        if (g_role == "app" && !g_server && g_remote && wifi) server_start();
         if (tick % 30) continue;
         r.lock();
         size_t d = r.direct.size(), rep = r.repeated.size(), n = r.nodes.size(), m = r.meaters.size();

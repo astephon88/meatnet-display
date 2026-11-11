@@ -52,6 +52,8 @@ small{color:#9aa0a6}.err{color:#e06666}.ok{color:#5fd873}
 <div class="row"><div style="flex:1"><label>Probe supervision timeout, ms</label><input type="number" id="supp" min="1000" max="32000" step="500"></div>
 <div style="flex:1"><label>Node supervision timeout, ms</label><input type="number" id="supn" min="1000" max="32000" step="500"></div></div>
 <label>Highest peer latency to grant <small>(0 = peers answer every interval)</small></label><input type="number" id="lat" min="0" max="10">
+<label>Role <small>(field: near the devices; app: near the phone; standalone: one unit for both)</small></label>
+<select id="role"><option value="field">Field unit</option><option value="app">App unit</option><option value="standalone">Standalone</option></select>
 <label>WiFi/Bluetooth coexistence</label>
 <select id="coex"><option value="bt">Prefer Bluetooth</option><option value="balance">Balance</option><option value="wifi">Prefer WiFi</option></select>
 </div>
@@ -72,13 +74,13 @@ function render(){
   $('peer').value=cfg.split_peer||'';$('port').value=cfg.split_port;
   $('keyhint').textContent=cfg.split_key_set?'(one is saved; same as on the app unit)':'(none saved; same as on the app unit)';
   $('supp').value=cfg.supervision_probe_ms;$('supn').value=cfg.supervision_node_ms;
-  $('lat').value=cfg.peer_latency_max;$('coex').value=cfg.coex;
+  $('lat').value=cfg.peer_latency_max;$('coex').value=cfg.coex;$('role').value=cfg.role;
   $('aphint').textContent=cfg.ap_password_set?'(one is saved)':'(none saved: the setup network is open)';
 }
 function save(){
   var o={wifi_ssid:$('ssid').value.trim(),split_peer:$('peer').value.trim(),split_port:+$('port').value,
     supervision_probe_ms:+$('supp').value,supervision_node_ms:+$('supn').value,
-    peer_latency_max:+$('lat').value,coex:$('coex').value};
+    peer_latency_max:+$('lat').value,coex:$('coex').value,role:$('role').value};
   if($('openn').checked)o.wifi_password='';else if($('pw').value)o.wifi_password=$('pw').value;
   if($('key').value)o.split_key=$('key').value;
   if($('apopen').checked)o.ap_password='';else if($('appw').value)o.ap_password=$('appw').value;
