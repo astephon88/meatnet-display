@@ -243,7 +243,7 @@ python3 -m host.run field --key <shared key> [--peer <ip>]   # web UI on :8081
 
 ### C++ field unit (ESP-IDF, in progress)
 
-`field-idf/` is a C++ port of the field unit on ESP-IDF + NimBLE. It speaks
+`firmware/` is a C++ port of the field unit on ESP-IDF + NimBLE. It speaks
 the same WiFi protocol, so it pairs with the existing app unit (ESP32 or
 Linux host). It exists mainly to get control the MicroPython unit lacks:
 disconnect reasons, connection parameters, and WiFi/Bluetooth coexistence.
@@ -258,7 +258,7 @@ the app unit's log. Next: 4 (diagnostics and tuning), then 5 (setup page).
 Build (ESP-IDF v5.5 installed in `~/esp/esp-idf`):
 
 ```
-cd field-idf
+cd firmware
 . ~/esp/esp-idf/export.sh
 idf.py set-target esp32s3        # once; use esp32 for plain ESP32 boards
 idf.py menuconfig                # "MeatNet field unit": bootstrap WiFi etc.
@@ -275,7 +275,7 @@ order matters:
 
 1. Start the flash first, with esptool set to keep retrying the connection:
    `python -m esptool --chip esp32s3 -p /dev/serial/by-id/<CH343 device>
-   --connect-attempts 0 write_flash @flash_args` (from `field-idf/build`).
+   --connect-attempts 0 write_flash @flash_args` (from `firmware/build`).
 2. **Then** hold BOOT, press and release RESET, release BOOT. esptool
    connects and writes.
 3. Afterwards, press RESET to run the new firmware. If it keeps landing in
@@ -352,7 +352,7 @@ charging.
 | `linktable.py` | Link/unlink tables persisted in `links.json` |
 | `readings.py` | Configured readings → display items (formatting, pages) |
 | `meater.py` | MEATER Pro decoding, sensor mapping and synthesized Combustion probe adverts |
-| `field-idf/` | C++ field unit on ESP-IDF + NimBLE (in progress); see `docs/field-unit-idf-plan.md` |
+| `firmware/` | C++ field unit on ESP-IDF + NimBLE (in progress); see `docs/field-unit-idf-plan.md` |
 | `host/` | Linux host versions of the app unit (BlueZ D-Bus peripheral) and field unit (bleak), sharing all protocol/node code; `python3 -m host.run app|field` |
 | `split.py` | Two-unit mode: field-side radio server, app-side remote radio and transport, WiFi protocol (TCP + UDP beacon) |
 | `power.py` | Standby (manual/auto), CPU/WiFi power save, battery voltage via ADC |

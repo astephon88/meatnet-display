@@ -41,7 +41,7 @@ Python app unit (ESP32 or the Linux host) as-is.
 - **Toolchain:** ESP-IDF installed on this host (`~/esp/esp-idf`,
   `~/.espressif`) when implementation starts. Builds and flashing run from
   here.
-- **Location:** `field-idf/` in this repository. It's a standard ESP-IDF
+- **Location:** `firmware/` in this repository. It's a standard ESP-IDF
   project and doesn't touch the MicroPython files.
 
 ## Compatibility contract (must match `split.py`)
@@ -163,7 +163,7 @@ MEATER = 6-byte address)
 ## Architecture
 
 ```
-field-idf/
+firmware/
   CMakeLists.txt, sdkconfig.defaults, partitions.csv
   main/        app_main.cpp       NVS, config, start tasks, console
   components/
@@ -265,7 +265,7 @@ field-idf/
      per link (`up`/`conn`/`down`), "+N more" when they don't fit. Pins and
      brightness in Kconfig (Waveshare defaults).
 
-## Changes outside `field-idf/`
+## Changes outside `firmware/`
 
 - `README.md`: a "C++ field unit" section (build, flash, settings).
 - `tests/`: the protocol compatibility harness.

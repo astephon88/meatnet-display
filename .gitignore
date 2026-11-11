@@ -5,3 +5,4 @@ __pycache__/
 host/*.json
 HANDOFF.md
 CLAUDE.md
+/build/
