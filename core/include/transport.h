@@ -44,6 +44,8 @@ public:
     virtual bool enabled() const { return true; }
     virtual uint32_t count() const { return 0; }    // notifications received
     virtual int mtu() const { return 23; }
+    // Connection diagnostics as JSON ({connects, drops, params, asked}), "" = none.
+    virtual std::string stats() const { return std::string(); }
     // Notifications received on a subscription ("status", "uart", "temp",
     // "battery") since the last call.
     virtual std::vector<Bytes> take(const std::string &sub) = 0;

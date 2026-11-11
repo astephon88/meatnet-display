@@ -3,6 +3,7 @@
 #include "links.h"
 #include "peripheral.h"
 #include "radio.h"
+#include "status.h"
 
 namespace esp {
 
@@ -25,8 +26,9 @@ public:
     }
     bool write(const core::Bytes &data) override { return radio::Links::get().write(key_, data); }
     const std::map<std::string, std::string> &info() const override { return info_; }
+    std::string stats() const override { return stats_; }
 
-    std::string state_ = "idle";
+    std::string state_ = "idle", stats_;
     uint32_t count_ = 0;
     int mtu_ = 23;
     std::map<std::string, std::string> info_;
@@ -81,6 +83,7 @@ void EspTransport::pump()
         link.mtu_ = rep.mtu;
         link.count_ = rep.count;
         link.info_ = rep.info;
+        link.stats_ = core::link_stats(rep.connects, rep.drops, rep.params, rep.asked);
         for (auto &rx : rep.rx) {
             auto &q = link.rx_[rx.first];
             q.push_back(rx.second);

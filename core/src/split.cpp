@@ -359,6 +359,12 @@ std::string SplitClient::peer() const
     return peer_;
 }
 
+std::string SplitClient::peer_ip() const
+{
+    std::lock_guard<std::mutex> g(mu_);
+    return peer_ip_;
+}
+
 void SplitClient::run()
 {
     int backoff_s = 2;
@@ -477,6 +483,7 @@ void SplitClient::session(const std::string &host)
     {
         std::lock_guard<std::mutex> g(mu_);
         peer_ = serial ? serial : "?";
+        peer_ip_ = host;
     }
     cJSON_Delete(reply);
     fr_.reset();

@@ -874,7 +874,10 @@ std::vector<LinkBrief> Links::collect_brief()
 {
     std::vector<LinkBrief> out;
     lock();
-    for (auto &kv : links_) out.push_back({kv.second->key, kv.second->kind, kv.second->state});
+    for (auto &kv : links_) {
+        const Link &l = *kv.second;
+        out.push_back({l.key, l.kind, l.state, l.mtu, l.count, l.connects, l.drops, l.params, l.asked});
+    }
     unlock();
     return out;
 }

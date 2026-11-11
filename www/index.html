@@ -17,7 +17,7 @@ input[type=text],input[type=password],input[type=number],select{width:100%;paddi
 .chk{display:flex;align-items:center;gap:8px;margin:.5em 0}
 .chk label{margin:0}
 button{background:#2b6cff;color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer;margin-top:10px}
-button.sec{background:#333a44}button.warn{background:#a33}button.sm{padding:5px 9px;margin:0}
+button.sec{background:#333a44}button.warn{background:#a33}button.sm{padding:5px 9px;margin:0}button:disabled{opacity:.5;cursor:default}
 table{width:100%;border-collapse:collapse;font-size:13px}
 td,th{padding:5px 4px;border-bottom:1px solid #2a2e35;text-align:left;vertical-align:top}
 th{color:#9aa0a6;font-weight:400}
@@ -85,13 +85,29 @@ small{color:#9aa0a6}.err{color:#e06666}.ok{color:#5fd873}
 <h2>WiFi</h2>
 <div class="card">
 <label>Network</label>
-<div class="row"><select id="ssidsel" onchange="ssid.value=this.value"><option value="">(scan to list networks)</option></select>
-<button type="button" class="sec sm" onclick="scan()">Scan</button></div>
+<div class="row"><select id="ssidsel" onchange="if(this.value)$('ssid').value=this.value"><option value="">(scan to list networks)</option></select>
+<button type="button" class="sec sm" id="scanb" onclick="scan()">Scan</button></div>
+<small id="scanmsg"></small>
 <label>SSID</label><input type="text" id="ssid">
 <label>Password <small id="pwhint"></small></label><input type="password" id="pw" placeholder="leave blank to keep the saved password">
 <div class="chk"><input type="checkbox" id="openn"><label for="openn">Open network (no password)</label></div>
 <button type="button" onclick="saveWifi()">Save &amp; reboot</button> <small id="wmsg"></small>
+<label>Setup network password <small id="aphint"></small></label><input type="password" id="appw" maxlength="63" placeholder="leave blank to keep">
+<div class="chk"><input type="checkbox" id="apopen"><label for="apopen">Open setup network (no password)</label></div>
+<button type="button" class="sec" onclick="saveAp()">Save setup network</button> <small id="apmsg"></small><br>
+<small>The unit opens its setup network <span id="apname">MeatNet-&lt;serial&gt;</span> when no WiFi is set or none can be reached.</small>
 </div>
+
+<div id="radio" style="display:none">
+<h2>Radio <small>(* = applied after reboot)</small></h2>
+<div class="card">
+<div class="row"><div style="flex:1"><label>Probe supervision timeout, ms *</label><input type="number" id="supp" min="1000" max="32000" step="500" onchange="setCfg({supervision_probe_ms:+this.value},'rmsg')"></div>
+<div style="flex:1"><label>Node supervision timeout, ms *</label><input type="number" id="supn" min="1000" max="32000" step="500" onchange="setCfg({supervision_node_ms:+this.value},'rmsg')"></div></div>
+<label>Highest peer latency to grant * <small>(0 = peers answer every interval)</small></label><input type="number" id="lat" min="0" max="10" onchange="setCfg({peer_latency_max:+this.value},'rmsg')">
+<label>WiFi/Bluetooth coexistence *</label>
+<select id="coex" onchange="setCfg({coex:this.value},'rmsg')"><option value="bt">Prefer Bluetooth</option><option value="balance">Balance</option><option value="wifi">Prefer WiFi</option></select>
+<small id="rmsg"></small>
+</div></div>
 
 <h2>Advanced <small>(* = applied after reboot)</small></h2>
 <div class="card">
@@ -117,7 +133,6 @@ small{color:#9aa0a6}.err{color:#e06666}.ok{color:#5fd873}
 <label>Serial (10 chars, blank = from MAC) *</label><input type="text" id="ser" maxlength="10" onchange="setCfg({serial:this.value})">
 <label>DIS model string *</label><input type="text" id="model" onchange="setCfg({dis_model:this.value})">
 <label>DIS firmware version <small>(reported to the app; reconnect the app to see a change)</small></label><input type="text" id="fwv" onchange="setCfg({dis_firmware:this.value.trim()})">
-<label>Setup AP password (8+ chars, blank = open) *</label><input type="password" id="appw" onchange="setCfg({ap_password:this.value})">
 <label>Display pins * <small>sck, mosi, dc, cs, rst, bl, rotation</small></label>
 <input type="text" id="pins" onchange="savePins(this.value)">
 <button type="button" class="warn" onclick="if(confirm('Reboot now?'))post('/api/reboot',{})">Reboot</button> <small id="amsg"></small>
@@ -138,6 +153,7 @@ function setCfg(o,msgEl){
   for(var k in o)cfg[k]=o[k];
   return post('/api/config',o).then(function(j){
     var m=$(msgEl||'amsg');if(m){m.className=j.ok?'ok':'err';m.textContent=j.ok?(j.reboot?'saved, reboot to apply':'saved'):j.error;}
+    if(!j.ok)return fetch('/api/config').then(function(r){return r.json();}).then(function(c){cfg=c;renderCfg();});
     renderCfg();if(S)upd(S);});
 }
 function renderCfg(){
@@ -154,6 +170,15 @@ function renderCfg(){
   var p=cfg.pins||{};$('pins').value=[p.sck,p.mosi,p.dc,p.cs,p.rst,p.bl,p.rotation].join(', ');
   if(document.activeElement!=$('ssid'))$('ssid').value=cfg.wifi_ssid||'';
   $('pwhint').textContent=cfg.wifi_password_set?'(a password is saved)':'';
+  $('aphint').textContent=cfg.ap_password_set?'(one is saved)':'(none saved: the setup network is open)';
+  // Radio settings exist on the C++ units only.
+  $('radio').style.display=cfg.supervision_probe_ms!=null?'':'none';
+  if(cfg.supervision_probe_ms!=null){$('supp').value=cfg.supervision_probe_ms;$('supn').value=cfg.supervision_node_ms;$('lat').value=cfg.peer_latency_max;$('coex').value=cfg.coex;}
+}
+function saveAp(){
+  var o={};
+  if($('apopen').checked)o.ap_password='';else if($('appw').value)o.ap_password=$('appw').value;else return;
+  setCfg(o,'apmsg').then(function(){$('appw').value='';$('apopen').checked=false;});
 }
 function savePins(v){
   var a=v.split(',').map(function(x){return parseInt(x,10);});
@@ -175,9 +200,16 @@ function meaterId(addr,id){
   var l=(cfg.meater_probes||[]).map(function(e){return e.addr==addr?{addr:addr,id:id}:e;});
   setCfg({meater_probes:l});
 }
+// Rebuilds a table body, unless one of its controls has focus (an open
+// dropdown would close on every status update).
+function setRows(id,html){
+  var el=$(id),a=document.activeElement;
+  if(a&&a!=document.body&&el.contains(a))return;
+  el.innerHTML=html;
+}
 function updMeaters(s,nl){
   var h='',ms=s.meaters||[];
-  if(!s.meater_bridge){$('meaters').innerHTML='<tr><td colspan="4"><small>Bridge is off.</small></td></tr>';return;}
+  if(!s.meater_bridge){setRows('meaters','<tr><td colspan="4"><small>Bridge is off.</small></td></tr>');return;}
   ms.forEach(function(m){
     var dis=!m.bridged&&nl>=s.budget?' disabled':'';
     var ids='';for(var i=1;i<=8;i++)ids+='<option'+(i==m.id?' selected':'')+'>'+i+'</option>';
@@ -186,7 +218,7 @@ function updMeaters(s,nl){
       '<td><select onchange="meaterId(\''+m.addr+'\',+this.value)"'+(m.bridged?'':' disabled')+'>'+ids+'</select></td>'+
       '<td><input type="checkbox"'+(m.bridged?' checked':'')+dis+' onchange="meaterCfg(\''+m.addr+'\',this.checked,8)"></td></tr>';
   });
-  $('meaters').innerHTML=h||'<tr><td colspan="4"><small>No MEATER heard yet (take it out of its charger; make sure the MEATER app isn\'t connected to it).</small></td></tr>';
+  setRows('meaters',h||'<tr><td colspan="4"><small>No MEATER heard yet (take it out of its charger; make sure the MEATER app isn\'t connected to it).</small></td></tr>');
 }
 function togglePower(){
   var on=!(S&&S.power&&S.power.standby);
@@ -208,14 +240,14 @@ function updSplit(s){
   }
 }
 function upd(s){
-  S=s;$('serial').textContent=s.serial;updSplit(s);
+  S=s;$('serial').textContent=s.serial;$('apname').textContent='MeatNet-'+s.serial;$('conn').textContent='';updSplit(s);
   var pw=s.power;
   if(pw){
     $('pwr').textContent=pw.standby?('standby ('+(pw.reason=='auto'?'auto, wakes when a probe is heard':'manual')+', '+Math.floor(pw.since_s/60)+' min)'):'on'+(pw.auto_standby_min?' (auto standby after '+pw.auto_standby_min+' min idle)':'');
     $('pwrbtn').textContent=pw.standby?'Wake':'Standby';
     var b=pw.battery;$('bat').textContent=b&&b.present?(b.v.toFixed(2)+' V, about '+b.pct+'%'):'not detected';
   }else{$('pwr').textContent='--';$('pwrbtn').style.display='none';}
-  var w=s.wifi;$('wifi').textContent=w.mode=='ap'?('setup AP '+w.ap_ssid+' at '+w.ip):(w.mode=='sta'?(w.ssid+' - '+w.ip):w.mode);
+  var w=s.wifi;$('wifi').textContent=w.mode=='ap'?('setup network '+w.ap_ssid+' at '+w.ip):(w.mode=='sta'?(w.ssid+' - '+w.ip):w.mode);
   $('inb').textContent=s.inbound+' of '+s.max_conn+' BLE connections';
   $('lnk').innerHTML=s.links.length?s.links.map(function(l){
     var t=esc(l.kind+' '+l.serial+': '+l.state),st=l.stats;
@@ -237,16 +269,16 @@ function upd(s){
     var mode=p.mode==1?'instant '+T(p.instant_c):(p.mode==3?'error':T(p.core_c)+' / '+T(p.surface_c)+' / '+T(p.ambient_c));
     var pr=p.prediction&&p.prediction.state==3?'<br><small>ready in '+Math.round(p.prediction.seconds/60)+' min</small>':'';
     h+='<tr><td>#'+p.id+' '+esc(p.serial)+(p.low_battery?' <span class="err">low batt</span>':'')+(p.alarming?' <span class="err">ALARM</span>':'')+'</td><td>'+mode+pr+'</td><td>'+esc(p.src)+(p.hops?' ('+p.hops+' hop)':'')+(p.rssi!=null?' '+p.rssi+'dBm':'')+'<br><small>'+p.age_s+'s ago'+(lk?', link '+esc(lk.state):'')+'</small></td>'+
-      '<td><input type="checkbox"'+(on?' checked':'')+dis+(p.direct||on?'':' disabled title="not heard directly"')+' onchange="toggleLink(\''+p.serial+'\',this.checked)"></td></tr>';
+      '<td>'+(p.src=='meater'?'<small>bridged (MEATER)</small>':'<input type="checkbox"'+(on?' checked':'')+dis+(p.direct||on?'':' disabled title="not heard directly"')+' onchange="toggleLink(\''+p.serial+'\',this.checked)">')+'</td></tr>';
   });
   lp.forEach(function(sr){if(!s.probes.some(function(p){return p.serial==sr;}))h+='<tr><td>'+esc(sr)+'</td><td>--</td><td>not heard</td><td><input type="checkbox" checked onchange="toggleLink(\''+sr+'\',this.checked)"></td></tr>';});
-  $('probes').innerHTML=h||'<tr><td colspan="4"><small>No probes heard yet.</small></td></tr>';
+  setRows('probes',h||'<tr><td colspan="4"><small>No probes heard yet.</small></td></tr>');
   h='';
   s.devices.forEach(function(d){
     var r=d.temp_c!=null?T(d.temp_c):(d.setpoint_c!=null?'set '+T(d.setpoint_c):'');
     h+='<tr><td>'+esc(d.name)+' '+esc(d.serial)+'</td><td>'+r+'</td><td>'+d.rssi+'dBm, '+d.age_s+'s</td><td><input type="checkbox"'+((cfg.upstream_node||[]).indexOf(d.serial)>=0?' checked':'')+' onchange="setUpstream(\''+d.serial+'\',this.checked)"></td></tr>';
   });
-  $('devices').innerHTML=h||'<tr><td colspan="4"><small>No other MeatNet devices heard.</small></td></tr>';
+  setRows('devices',h||'<tr><td colspan="4"><small>No other MeatNet devices heard.</small></td></tr>');
 }
 // ---- readings editor ----
 function devOptions(sel){
@@ -289,31 +321,32 @@ function saveRds(){
 }
 // ---- wifi ----
 function scan(){
-  $('wmsg').textContent='scanning...';
+  var b=$('scanb'),m=$('scanmsg');
+  b.disabled=true;b.textContent='Scanning...';m.className='';m.textContent='takes a few seconds';
   fetch('/api/wifi/scan').then(function(r){return r.json();}).then(function(j){
-    $('wmsg').textContent='';
-    $('ssidsel').innerHTML='<option value="">(choose)</option>'+j.networks.map(function(n){return '<option value="'+esc(n.ssid)+'">'+esc(n.ssid)+' ('+n.rssi+'dBm'+(n.secure?'':', open')+')</option>';}).join('');
-  }).catch(function(){$('wmsg').textContent='scan failed';});
+    if(!j.ok){m.className='err';m.textContent=j.error;return;}
+    m.className='ok';m.textContent=j.networks.length+' networks found';
+    $('ssidsel').innerHTML='<option value="">(choose)</option>'+j.networks.map(function(n){return '<option value="'+esc(n.ssid)+'">'+esc(n.ssid)+' ('+n.rssi+' dBm'+(n.secure?'':', open')+')</option>';}).join('');
+  }).catch(function(){m.className='err';m.textContent='scan failed';}).then(function(){b.disabled=false;b.textContent='Scan';});
 }
 function saveWifi(){
   var o={ssid:$('ssid').value.trim()};
   if($('openn').checked)o.password='';else if($('pw').value)o.password=$('pw').value;
   post('/api/wifi',o).then(function(j){$('wmsg').className=j.ok?'ok':'err';$('wmsg').textContent=j.ok?'saved, rebooting... reconnect to your network':j.error;});
 }
-// ---- live updates ----
-function addlog(line){var el=$('log'),NL=String.fromCharCode(10);var l=el.textContent?el.textContent.split(NL):[];l.push(line);el.textContent=l.slice(-200).join(NL);el.scrollTop=el.scrollHeight;}
-var wsok=false;
-function connectWS(){
-  try{var ws=new WebSocket('ws://'+location.host+'/ws');
-    ws.onopen=function(){wsok=true;$('conn').textContent='live';};
-    ws.onmessage=function(ev){var m=JSON.parse(ev.data);if(m.t=='status')upd(m.d);else if(m.t=='log')addlog(m.d);};
-    ws.onclose=function(){wsok=false;$('conn').textContent='reconnecting';setTimeout(connectWS,2000);};
-    ws.onerror=function(){try{ws.close();}catch(e){}};
-  }catch(e){setTimeout(connectWS,3000);}
+// ---- live updates (polling: status every 1.5 s, new log lines every 2 s) ----
+function addlog(lines){
+  if(!lines.length)return;
+  var el=$('log'),NL=String.fromCharCode(10),l=el.textContent?el.textContent.split(NL):[];
+  var end=el.scrollTop+el.clientHeight>=el.scrollHeight-4;
+  el.textContent=l.concat(lines).slice(-200).join(NL);if(end)el.scrollTop=el.scrollHeight;
 }
-setInterval(function(){if(!wsok)fetch('/api/state').then(function(r){return r.json();}).then(upd).catch(function(){});},3000);
+var logseq=0;
+function pollState(){fetch('/api/state').then(function(r){return r.json();}).then(upd).catch(function(){$('conn').textContent='offline';});}
+function pollLog(){fetch('/api/log?since='+logseq).then(function(r){return r.json();}).then(function(j){
+  if(j.seq<logseq)$('log').textContent='';logseq=j.seq;addlog(j.lines||[]);}).catch(function(){});}
 fetch('/api/config').then(function(r){return r.json();}).then(function(c){cfg=c;renderCfg();
   fetch('/api/state').then(function(r){return r.json();}).then(function(s){upd(s);renderRds();});});
-connectWS();
+setInterval(pollState,1500);pollLog();setInterval(pollLog,2000);
 </script>
 </div></body></html>

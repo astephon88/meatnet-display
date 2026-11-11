@@ -2,6 +2,7 @@
 
   GET  /                 www/index.html (streamed from flash)
   GET  /ws               WebSocket: {"t":"status"} every second + log lines
+  GET  /api/log?since=N  {"seq", "lines"}: log lines after N (the page polls this)
   GET  /api/state        live status JSON
   GET  /api/config       settings (passwords omitted)
   POST /api/config       partial settings update (JSON), applied live
@@ -152,7 +153,8 @@ class WebUI:
             parts = line.decode().split(" ")
             if len(parts) < 2:
                 return
-            method, path = parts[0], parts[1].split("?")[0]
+            target, _, query = parts[1].partition("?")
+            method, path = parts[0], target
             clen = 0
             ws_key = None
             while True:
@@ -174,7 +176,12 @@ class WebUI:
                 await self._send_file(writer, "www/index.html", "text/html")
             elif path.startswith("/api/"):
                 try:
-                    res = await self._api(method, path, json.loads(body) if body else {})
+                    req = json.loads(body) if body else {}
+                    for kv in query.split("&"):
+                        k, _, v = kv.partition("=")
+                        if k and k not in req:
+                            req[k] = v
+                    res = await self._api(method, path, req)
                 except Exception as exc:
                     res = {"ok": False, "error": str(exc)}
                 self._send(writer, "200 OK", "application/json", json.dumps(res))
@@ -223,6 +230,17 @@ class WebUI:
     async def _api(self, method, path, req):
         if path == "/api/state":
             return self.state()
+        if path == "/api/log":
+            try:
+                since = int(req.get("since") or 0)
+            except ValueError:
+                since = 0
+            lines = self.log["lines"]
+            last = lines[-1][0] if lines else 0
+            if since > last:            # restarted since the page's last poll
+                since = 0
+            new = [t for seq, t in lines if seq > since]
+            return {"seq": last, "lines": new[-40:] if since == 0 else new}
         if path == "/api/config":
             if method == "POST":
                 return self.update_config(req)

@@ -43,6 +43,11 @@ struct LinkReport {
 // Just a link's identity and state (for the status screen).
 struct LinkBrief {
     std::string key, kind, state;
+    int mtu = 23;
+    uint32_t count = 0;
+    uint32_t connects = 0;
+    std::map<std::string, uint32_t> drops;
+    std::string params, asked;
 };
 
 struct Link;

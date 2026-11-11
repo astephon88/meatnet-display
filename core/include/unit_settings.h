@@ -87,4 +87,11 @@ void merge_settings(Settings &s, const std::string &json);
 // _SECRET).
 cJSON *settings_to_json(const Settings &s, bool secrets);
 
+// A settings change from the web page (POST /api/config): checks every key
+// present (unknown keys are ignored, as web.py does) and applies them all,
+// or none with `err` set. `reboot` tells whether a changed key only takes
+// effect after a restart. Secrets: an empty split_key keeps the saved one;
+// wifi_password and ap_password may be "" (open network) or 8-63 characters.
+bool apply_config(Settings &s, const cJSON *req, std::string &err, bool &reboot);
+
 }  // namespace core

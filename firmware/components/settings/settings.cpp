@@ -1,9 +1,9 @@
 #include "settings.h"
 
 #include <cstring>
+#include <mutex>
 
 #include "cJSON.h"
-#include "unit_settings.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "sdkconfig.h"
@@ -12,182 +12,134 @@ namespace settings {
 
 static const char *TAG = "settings";
 static const char *NS = "meatnet";
+static const char *BLOB = "cfg";
 
-static Settings g = {
-    "", "", "", CONFIG_MEATNET_SPLIT_PORT, "",
-    CONFIG_MEATNET_SUPERVISION_PROBE_MS, CONFIG_MEATNET_SUPERVISION_NODE_MS,
-    CONFIG_MEATNET_PEER_LATENCY_MAX,
+static std::mutex g_mu;
+static core::Settings g;
+
+static core::Settings defaults()
+{
+    core::Settings s;
+    s.split_port = CONFIG_MEATNET_SPLIT_PORT;
+    s.supervision_probe_ms = CONFIG_MEATNET_SUPERVISION_PROBE_MS;
+    s.supervision_node_ms = CONFIG_MEATNET_SUPERVISION_NODE_MS;
+    s.peer_latency_max = CONFIG_MEATNET_PEER_LATENCY_MAX;
 #if CONFIG_MEATNET_COEX_WIFI
-    "wifi",
+    s.coex = "wifi";
 #elif CONFIG_MEATNET_COEX_BALANCE
-    "balance",
+    s.coex = "balance";
 #else
-    "bt",
+    s.coex = "bt";
 #endif
-    "",
-    "field",                        // what units built before the role setting were
-    "",
-};
+    return s;
+}
 
 // -- NVS helpers (NVS keys are at most 15 characters) ---------------------------
 
-static void get_str(nvs_handle_t h, const char *key, std::string &out)
+static bool get_str(nvs_handle_t h, const char *key, std::string &out)
 {
     size_t len = 0;
-    if (nvs_get_str(h, key, nullptr, &len) != ESP_OK || len == 0) return;
+    if (nvs_get_str(h, key, nullptr, &len) != ESP_OK || len == 0) return false;
     std::string v(len, '\0');
-    if (nvs_get_str(h, key, &v[0], &len) == ESP_OK) {
-        v.resize(len - 1);
-        out = v;
-    }
+    if (nvs_get_str(h, key, &v[0], &len) != ESP_OK) return false;
+    v.resize(len - 1);
+    out = v;
+    return true;
 }
 
-static void get_int(nvs_handle_t h, const char *key, int &out)
+static bool get_int(nvs_handle_t h, const char *key, int &out)
 {
     int32_t v;
-    if (nvs_get_i32(h, key, &v) == ESP_OK) out = v;
+    if (nvs_get_i32(h, key, &v) != ESP_OK) return false;
+    out = v;
+    return true;
+}
+
+// Settings saved one key at a time by earlier builds (all field units, so
+// the role defaults to field), plus their node settings blob.
+static const char *const kOldKeys[] = {"wifi_ssid", "wifi_pw", "split_peer", "split_port", "split_key",
+                                       "sup_probe_ms", "sup_node_ms", "lat_max", "coex", "ap_pw", "role",
+                                       "node"};
+
+static bool migrate(nvs_handle_t h, core::Settings &s)
+{
+    bool any = false;
+    std::string node;
+    if (get_str(h, "node", node)) {
+        core::merge_settings(s, node);
+        any = true;
+    }
+    s.role = "field";
+    any |= get_str(h, "wifi_ssid", s.wifi_ssid);
+    any |= get_str(h, "wifi_pw", s.wifi_password);
+    any |= get_str(h, "split_peer", s.split_peer);
+    any |= get_int(h, "split_port", s.split_port);
+    any |= get_str(h, "split_key", s.split_key);
+    any |= get_int(h, "sup_probe_ms", s.supervision_probe_ms);
+    any |= get_int(h, "sup_node_ms", s.supervision_node_ms);
+    any |= get_int(h, "lat_max", s.peer_latency_max);
+    any |= get_str(h, "coex", s.coex);
+    any |= get_str(h, "ap_pw", s.ap_password);
+    any |= get_str(h, "role", s.role);
+    return any;
+}
+
+static bool save(const core::Settings &s)
+{
+    cJSON *o = core::settings_to_json(s, true);
+    char *text = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    if (!text) return false;
+    nvs_handle_t h;
+    bool ok = nvs_open(NS, NVS_READWRITE, &h) == ESP_OK;
+    if (ok) {
+        ok = nvs_set_blob(h, BLOB, text, strlen(text)) == ESP_OK;
+        // The per-key values of earlier builds are in the blob now.
+        if (ok)
+            for (const char *k : kOldKeys) nvs_erase_key(h, k);
+        ok = ok && nvs_commit(h) == ESP_OK;
+        nvs_close(h);
+    }
+    cJSON_free(text);
+    return ok;
 }
 
 void load()
 {
+    core::Settings s = defaults();
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return;   // nothing saved yet
-    get_str(h, "wifi_ssid", g.wifi_ssid);
-    get_str(h, "wifi_pw", g.wifi_password);
-    get_str(h, "split_peer", g.split_peer);
-    get_int(h, "split_port", g.split_port);
-    get_str(h, "split_key", g.split_key);
-    get_int(h, "sup_probe_ms", g.supervision_probe_ms);
-    get_int(h, "sup_node_ms", g.supervision_node_ms);
-    get_int(h, "lat_max", g.peer_latency_max);
-    get_str(h, "coex", g.coex);
-    get_str(h, "ap_pw", g.ap_password);
-    get_str(h, "role", g.role);
-    get_str(h, "node", g.node_json);
-    nvs_close(h);
+    if (nvs_open(NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t len = 0;
+        if (nvs_get_blob(h, BLOB, nullptr, &len) == ESP_OK && len > 0) {
+            std::string text(len, '\0');
+            if (nvs_get_blob(h, BLOB, &text[0], &len) == ESP_OK) core::merge_settings(s, text);
+            nvs_close(h);
+        } else {
+            bool old = migrate(h, s);
+            nvs_close(h);
+            if (old) ESP_LOGI(TAG, "moved the settings to one NVS entry: %s", save(s) ? "ok" : "failed");
+        }
+    }
+    std::lock_guard<std::mutex> lk(g_mu);
+    g = s;
 }
 
-const Settings &get() { return g; }
-
-static bool save(const Settings &s)
+core::Settings get()
 {
-    nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
-    bool ok = nvs_set_str(h, "wifi_ssid", s.wifi_ssid.c_str()) == ESP_OK
-           && nvs_set_str(h, "wifi_pw", s.wifi_password.c_str()) == ESP_OK
-           && nvs_set_str(h, "split_peer", s.split_peer.c_str()) == ESP_OK
-           && nvs_set_i32(h, "split_port", s.split_port) == ESP_OK
-           && nvs_set_str(h, "split_key", s.split_key.c_str()) == ESP_OK
-           && nvs_set_i32(h, "sup_probe_ms", s.supervision_probe_ms) == ESP_OK
-           && nvs_set_i32(h, "sup_node_ms", s.supervision_node_ms) == ESP_OK
-           && nvs_set_i32(h, "lat_max", s.peer_latency_max) == ESP_OK
-           && nvs_set_str(h, "coex", s.coex.c_str()) == ESP_OK
-           && nvs_set_str(h, "ap_pw", s.ap_password.c_str()) == ESP_OK
-           && nvs_set_str(h, "role", s.role.c_str()) == ESP_OK
-           && nvs_set_str(h, "node", s.node_json.c_str()) == ESP_OK
-           && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
-    return ok;
+    std::lock_guard<std::mutex> lk(g_mu);
+    return g;
 }
-
-// -- JSON ---------------------------------------------------------------------------
 
 cJSON *to_json()
 {
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "wifi_ssid", g.wifi_ssid.c_str());
-    cJSON_AddBoolToObject(o, "wifi_password_set", !g.wifi_password.empty());
-    cJSON_AddStringToObject(o, "split_peer", g.split_peer.c_str());
-    cJSON_AddNumberToObject(o, "split_port", g.split_port);
-    cJSON_AddBoolToObject(o, "split_key_set", !g.split_key.empty());
-    cJSON_AddNumberToObject(o, "supervision_probe_ms", g.supervision_probe_ms);
-    cJSON_AddNumberToObject(o, "supervision_node_ms", g.supervision_node_ms);
-    cJSON_AddNumberToObject(o, "peer_latency_max", g.peer_latency_max);
-    cJSON_AddStringToObject(o, "coex", g.coex.c_str());
-    cJSON_AddStringToObject(o, "role", g.role.c_str());
-    cJSON_AddBoolToObject(o, "ap_password_set", !g.ap_password.empty());
-    core::Settings node;
-    core::merge_settings(node, g.node_json);
-    cJSON_AddItemToObject(o, "node", core::settings_to_json(node, false));
-    return o;
+    return core::settings_to_json(get(), false);
 }
 
-static bool take_str(const cJSON *obj, const char *name, size_t max, std::string &out,
-                     std::string &err)
+bool update(const cJSON *obj, std::string &err, bool &reboot)
 {
-    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, name);
-    if (!v) return true;
-    if (!cJSON_IsString(v) || strlen(v->valuestring) > max) {
-        err = std::string(name) + ": text of at most " + std::to_string(max) + " characters";
-        return false;
-    }
-    out = v->valuestring;
-    return true;
-}
-
-static bool take_int(const cJSON *obj, const char *name, int lo, int hi, int &out,
-                     std::string &err)
-{
-    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, name);
-    if (!v) return true;
-    if (!cJSON_IsNumber(v) || v->valuedouble < lo || v->valuedouble > hi
-        || v->valuedouble != (int)v->valuedouble) {
-        err = std::string(name) + ": a whole number from " + std::to_string(lo) + " to "
-            + std::to_string(hi);
-        return false;
-    }
-    out = (int)v->valuedouble;
-    return true;
-}
-
-bool update(const cJSON *obj, std::string &err)
-{
-    Settings s = g;
-    std::string pw = s.wifi_password, key = s.split_key, ap_pw = s.ap_password;
-    if (!take_str(obj, "wifi_ssid", 32, s.wifi_ssid, err)
-        || !take_str(obj, "wifi_password", 63, pw, err)
-        || !take_str(obj, "split_peer", 64, s.split_peer, err)
-        || !take_int(obj, "split_port", 1, 65535, s.split_port, err)
-        || !take_str(obj, "split_key", 64, key, err)
-        || !take_int(obj, "supervision_probe_ms", 1000, 32000, s.supervision_probe_ms, err)
-        || !take_int(obj, "supervision_node_ms", 1000, 32000, s.supervision_node_ms, err)
-        || !take_int(obj, "peer_latency_max", 0, 10, s.peer_latency_max, err)
-        || !take_str(obj, "coex", 7, s.coex, err)
-        || !take_str(obj, "role", 10, s.role, err)
-        || !take_str(obj, "ap_password", 63, ap_pw, err))
-        return false;
-    if (s.role != "field" && s.role != "app" && s.role != "standalone") {
-        err = "role: field, app or standalone";
-        return false;
-    }
-    if (s.coex != "bt" && s.coex != "balance" && s.coex != "wifi") {
-        err = "coex: bt, balance or wifi";
-        return false;
-    }
-    if (!pw.empty() && pw.size() < 8) {
-        err = "wifi_password: 8 to 63 characters (empty = open network)";
-        return false;
-    }
-    if (!ap_pw.empty() && ap_pw.size() < 8) {
-        err = "ap_password: 8 to 63 characters (empty = open setup network)";
-        return false;
-    }
-    // A blank split key in the form means "keep"; it can't be cleared to
-    // nothing, since the app unit always checks it.
-    if (!key.empty()) s.split_key = key;
-    const cJSON *node = cJSON_GetObjectItemCaseSensitive(obj, "node");
-    if (cJSON_IsObject(node)) {
-        core::Settings ns;
-        core::merge_settings(ns, s.node_json);
-        core::merge_settings(ns, node);
-        cJSON *j = core::settings_to_json(ns, false);
-        char *text = cJSON_PrintUnformatted(j);
-        cJSON_Delete(j);
-        s.node_json = text ? text : "";
-        cJSON_free(text);
-    }
-    s.wifi_password = pw;
-    s.ap_password = ap_pw;
+    std::lock_guard<std::mutex> lk(g_mu);
+    core::Settings s = g;
+    if (!core::apply_config(s, obj, err, reboot)) return false;
     if (!save(s)) {
         err = "could not save to flash";
         return false;
@@ -199,8 +151,9 @@ bool update(const cJSON *obj, std::string &err)
 
 void adopt_wifi(const std::string &ssid, const std::string &password)
 {
+    std::lock_guard<std::mutex> lk(g_mu);
     if (!g.wifi_ssid.empty() || ssid.empty()) return;
-    Settings s = g;
+    core::Settings s = g;
     s.wifi_ssid = ssid;
     s.wifi_password = password;
     if (save(s)) {

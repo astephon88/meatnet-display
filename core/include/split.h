@@ -140,7 +140,8 @@ public:
     void session(const std::string &host);
 
     bool connected() const { return connected_; }
-    std::string peer() const;
+    std::string peer() const;      // the app unit's serial
+    std::string peer_ip() const;
     int rtt_ms() const { return rtt_ms_; }
 
 private:
@@ -153,7 +154,7 @@ private:
     std::atomic<bool> stop_{false}, connected_{false};
     std::atomic<int> rtt_ms_{-1};
     mutable std::mutex mu_;
-    std::string peer_;
+    std::string peer_, peer_ip_;
 };
 
 // -- app side -----------------------------------------------------------------------------
@@ -173,6 +174,7 @@ public:
     std::vector<Bytes> take(const std::string &sub) override;
     bool write(const Bytes &data) override;
     const std::map<std::string, std::string> &info() const override { return info_; }
+    std::string stats() const override { return stats_; }
     std::string describe() const { return desc_.empty() ? state_ : desc_; }
 
     std::string state_ = "idle", desc_;

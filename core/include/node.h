@@ -171,6 +171,7 @@ public:
     bool probe_in_network(const Bytes &serial4);
     std::vector<Bytes> network_slots();
     std::vector<protocol::NodeEntry> node_list();
+    static std::string link_name(const Bytes &key, const Link &link);   // serial or address
 
     Transport &t;
     Settings &cfg;
@@ -214,7 +215,6 @@ private:
                bool inbound = true, std::optional<bool> links = std::nullopt);
 
     void service_link(const Bytes &key, Link &link, int64_t now);
-    static std::string link_name(const Bytes &key, const Link &link);
 
     meater::Fields meater_fields(const Bytes &addr);
     Bytes meater_direct(const Bytes &addr);

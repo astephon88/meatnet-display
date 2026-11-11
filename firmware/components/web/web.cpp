@@ -13,17 +13,18 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "log_ring.h"
 #include "lwip/sockets.h"
 #include "settings.h"
 
-extern const char page_start[] asm("_binary_settings_html_start");
-extern const char page_end[] asm("_binary_settings_html_end");
+extern const char page_start[] asm("_binary_index_html_start");
+extern const char page_end[] asm("_binary_index_html_end");
 
 namespace web {
 
 static const char *TAG = "web";
-static constexpr size_t kMaxBody = 2048;
-static std::function<cJSON *()> g_state;
+static constexpr size_t kMaxBody = 4096;
+static Handlers g_h;
 static uint32_t g_setup_ip;
 
 static esp_err_t send_json(httpd_req_t *req, cJSON *o)
@@ -38,12 +39,12 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *o)
 }
 
 static esp_err_t send_result(httpd_req_t *req, bool ok, const std::string &error = "",
-                             bool reboot = false)
+                             const char *flag = nullptr)
 {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "ok", ok);
     if (!ok) cJSON_AddStringToObject(o, "error", error.c_str());
-    if (reboot) cJSON_AddBoolToObject(o, "reboot", true);
+    if (flag) cJSON_AddBoolToObject(o, flag, true);
     return send_json(req, o);
 }
 
@@ -79,7 +80,7 @@ static esp_err_t page(httpd_req_t *req)
 
 static esp_err_t state(httpd_req_t *req)
 {
-    return send_json(req, g_state ? g_state() : cJSON_CreateObject());
+    return send_json(req, g_h.state ? g_h.state() : cJSON_CreateObject());
 }
 
 static esp_err_t config_get(httpd_req_t *req)
@@ -92,9 +93,55 @@ static esp_err_t config_post(httpd_req_t *req)
     cJSON *o = read_json(req);
     if (!o) return ESP_OK;
     std::string err;
-    bool ok = settings::update(o, err);
+    bool reboot = false;
+    bool ok = settings::update(o, err, reboot);
     cJSON_Delete(o);
-    return send_result(req, ok, err, ok);
+    if (ok && g_h.config_changed) g_h.config_changed();
+    return send_result(req, ok, err, ok && reboot ? "reboot" : nullptr);
+}
+
+static void restart_soon();
+
+// {"ssid", "password"}: save and restart (a missing password keeps the saved
+// one, "" = open network).
+static esp_err_t wifi_set(httpd_req_t *req)
+{
+    cJSON *o = read_json(req);
+    if (!o) return ESP_OK;
+    const cJSON *ssid = cJSON_GetObjectItem(o, "ssid"), *pw = cJSON_GetObjectItem(o, "password");
+    cJSON *upd = cJSON_CreateObject();
+    if (cJSON_IsString(ssid) && *ssid->valuestring) cJSON_AddStringToObject(upd, "wifi_ssid", ssid->valuestring);
+    if (cJSON_IsString(pw)) cJSON_AddStringToObject(upd, "wifi_password", pw->valuestring);
+    cJSON_Delete(o);
+    std::string err = "SSID required";
+    bool reboot = false;
+    bool ok = cJSON_GetObjectItem(upd, "wifi_ssid") && settings::update(upd, err, reboot);
+    cJSON_Delete(upd);
+    send_result(req, ok, err, ok ? "restart" : nullptr);
+    if (ok) restart_soon();
+    return ESP_OK;
+}
+
+static esp_err_t power(httpd_req_t *req)
+{
+    cJSON *o = read_json(req);
+    if (!o) return ESP_OK;
+    const cJSON *on = cJSON_GetObjectItem(o, "standby");
+    cJSON *res = g_h.power ? g_h.power(cJSON_IsTrue(on)) : nullptr;
+    cJSON_Delete(o);
+    if (!res) return send_result(req, false, "power management unavailable");
+    return send_json(req, res);
+}
+
+// ?since=N: the log lines after N.
+static esp_err_t log_lines(httpd_req_t *req)
+{
+    char q[32] = "", v[12] = "";
+    uint32_t since = 0;
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "since", v, sizeof(v)) == ESP_OK)
+        since = strtoul(v, nullptr, 10);
+    return send_json(req, g_h.log ? g_h.log->since(since) : cJSON_CreateObject());
 }
 
 // Nearby networks, strongest first, one entry per name (hidden ones left
@@ -187,10 +234,9 @@ static esp_err_t not_found(httpd_req_t *req, httpd_err_code_t)
 
 static void restart(void *) { esp_restart(); }
 
-static esp_err_t reboot(httpd_req_t *req)
+// Restarts in half a second, so the reply goes out first.
+static void restart_soon()
 {
-    send_result(req, true);
-    // Let the reply go out first.
     static esp_timer_handle_t t = nullptr;
     if (!t) {
         esp_timer_create_args_t a = {};
@@ -199,17 +245,27 @@ static esp_err_t reboot(httpd_req_t *req)
         esp_timer_create(&a, &t);
     }
     esp_timer_start_once(t, 500 * 1000);
+}
+
+static esp_err_t reboot(httpd_req_t *req)
+{
+    send_result(req, true);
+    restart_soon();
     return ESP_OK;
 }
 
-void start(std::function<cJSON *()> state_fn, uint32_t setup_ip)
+void start(Handlers h, uint32_t setup_ip)
 {
-    g_state = state_fn;
+    g_h = std::move(h);
     g_setup_ip = setup_ip;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_open_sockets = 3;       // lwIP has 10 sockets; split link + captive DNS need 3
     cfg.lru_purge_enable = true;
     cfg.stack_size = 6144;
+    cfg.max_uri_handlers = 12;
+    // Requests for unknown paths (a browser's /favicon.ico) are routine.
+    esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
+    esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP server failed to start");
@@ -221,6 +277,9 @@ void start(std::function<cJSON *()> state_fn, uint32_t setup_ip)
         {"/api/config", HTTP_GET, config_get, nullptr},
         {"/api/config", HTTP_POST, config_post, nullptr},
         {"/api/wifi/scan", HTTP_GET, wifi_scan, nullptr},
+        {"/api/wifi", HTTP_POST, wifi_set, nullptr},
+        {"/api/power", HTTP_POST, power, nullptr},
+        {"/api/log", HTTP_GET, log_lines, nullptr},
         {"/api/reboot", HTTP_POST, reboot, nullptr},
     };
     for (const auto &u : uris) httpd_register_uri_handler(server, &u);

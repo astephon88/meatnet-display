@@ -1,45 +1,29 @@
-// Field unit settings, stored in NVS (namespace "meatnet"). Loaded once at
-// boot; changes are saved at once and applied by a reboot. Kconfig supplies
-// defaults for the radio and the port only; WiFi, the app unit address and
-// the split key only ever come from NVS.
+// The unit's settings (core::Settings), stored in NVS (namespace "meatnet")
+// as one JSON blob, secrets included. Kconfig supplies defaults for the radio
+// and the split port only; WiFi, the app unit address and the shared key only
+// ever come from NVS. Units built before the blob had one NVS key per
+// setting: load() moves those over once.
 #pragma once
 
 #include <string>
+
+#include "unit_settings.h"
 
 struct cJSON;
 
 namespace settings {
 
-struct Settings {
-    std::string wifi_ssid;
-    std::string wifi_password;      // secret
-    std::string split_peer;         // app unit host/IP; empty = UDP beacon
-    int split_port;
-    std::string split_key;          // secret
-    int supervision_probe_ms;
-    int supervision_node_ms;
-    int peer_latency_max;
-    std::string coex;               // "bt", "balance" or "wifi"
-    std::string ap_password;        // secret; setup network, "" = open
-    std::string role;               // "field", "app" or "standalone"
-    // The node's settings (app and standalone roles; config.json format,
-    // secrets left out): core::Settings is loaded from it.
-    std::string node_json;
-};
-
 void load();
-const Settings &get();
+core::Settings get();               // a copy: the web server changes them
 
 // The settings as JSON for the web page: secrets replaced by
 // "<name>_set": true/false.
 cJSON *to_json();
 
-// Applies the fields present in `obj`, validates them and saves them to NVS.
-// Secrets: a missing wifi_password or ap_password keeps the saved one
-// ("" = open network); a missing or empty split_key keeps the saved one. A
-// "node" object merges into node_json. Returns false with `err`
-// set when a value is invalid; nothing is saved then.
-bool update(const cJSON *obj, std::string &err);
+// A change from the web page (core::apply_config), saved at once. Returns
+// false with `err` set when a value is invalid; nothing changes then.
+// `reboot`: some changed key only takes effect after a restart.
+bool update(const cJSON *obj, std::string &err, bool &reboot);
 
 // Adopts WiFi credentials stored by the WiFi driver (from builds that set
 // them in Kconfig) when none are saved here yet.
