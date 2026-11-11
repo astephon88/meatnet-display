@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 
 namespace protocol {
@@ -116,7 +117,11 @@ std::string probe_serial_str(const Bytes &serial4)
 
 Bytes probe_serial_bytes(const std::string &text)
 {
-    uint32_t v = static_cast<uint32_t>(std::stoul(text, nullptr, 16));
+    // No exceptions in core (the firmware builds without them).
+    if (text.empty() || text.size() > 8) return Bytes();
+    char *end;
+    unsigned long v = std::strtoul(text.c_str(), &end, 16);
+    if (*end) return Bytes();
     Bytes out;
     put32(out, v);
     return out;

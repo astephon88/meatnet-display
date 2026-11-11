@@ -3,22 +3,12 @@
 #include <cstring>
 
 #include "doctest.h"
+#include "helpers.h"
 #include "proto.h"
 #include "protocol.h"
 
 namespace p = protocol;
-using p::Bytes;
-
-static Bytes B(const char *s, size_t n) { return Bytes(s, n); }
-
-static Bytes le16(unsigned v) { return Bytes{char(v & 0xFF), char(v >> 8 & 0xFF)}; }
-
-static Bytes le32(uint32_t v)
-{
-    Bytes b;
-    for (int i = 0; i < 4; i++) b += char(v >> (8 * i) & 0xFF);
-    return b;
-}
+using namespace testing;
 
 static Bytes one_frame_payload(const Bytes &frame, p::Frame *out = nullptr)
 {
@@ -27,13 +17,6 @@ static Bytes one_frame_payload(const Bytes &frame, p::Frame *out = nullptr)
     REQUIRE(frames.size() == 1);
     if (out) *out = frames[0];
     return frames[0].payload;
-}
-
-static p::Frame one_frame(const Bytes &frame)
-{
-    p::Frame f;
-    one_frame_payload(frame, &f);
-    return f;
 }
 
 TEST_CASE("crc known vector")
@@ -112,26 +95,6 @@ TEST_CASE("node <-> probe translation")
     CHECK(p::probe_to_node_payload(serial, "\x01") == serial + "\x01");
 }
 
-static Bytes raw13(const std::vector<double> &temps_c)
-{
-    Bytes out(13, '\0');
-    for (size_t i = 0; i < temps_c.size(); i++) {
-        unsigned v = static_cast<unsigned>(std::lround((temps_c[i] + 20) / 0.05)) & 0x1FFF;
-        for (int b = 0; b < 13; b++)
-            if (v >> b & 1) {
-                unsigned bit = 13 * i + b;
-                out[bit / 8] = char(uint8_t(out[bit / 8]) | 1 << (bit % 8));
-            }
-    }
-    return out;
-}
-
-static Bytes probe_body(const Bytes &serial, const std::vector<double> &temps, int mode_byte = 0,
-                        int vs_byte = 0)
-{
-    return Bytes(1, 1) + serial + raw13(temps) + char(mode_byte) + char(vs_byte) + Bytes(3, '\0');
-}
-
 TEST_CASE("probe advert decode and repeat")
 {
     Bytes serial("\x01\x02\x03\x04", 4);
@@ -165,16 +128,6 @@ TEST_CASE("display advert layout")
     CHECK(msd.substr(3, 10) == "ABCDEFGHIJ");
     CHECK(msd[13] == 1);
     CHECK(msd.size() == 2 + 1 + 10 + 1 + 11);
-}
-
-static Bytes status100(uint32_t session = 0x01020304, unsigned period = 1000)
-{
-    Bytes s = le32(10) + le32(20) + raw13(std::vector<double>(8, 60)) + Bytes(2, '\0');
-    s += Bytes(7 + 10 + 8, '\0');           // prediction, food safe
-    s += Bytes(2 + 44, '\0');               // overheat, prefs, alarms
-    s += le32(session) + le16(period);
-    REQUIRE(s.size() == 100);
-    return s;
 }
 
 TEST_CASE("node probe status layout")

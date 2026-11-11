@@ -104,7 +104,7 @@ double decode_raw_temperature(unsigned raw);   // 13-bit, 0.1 C steps, -20 C off
 Bytes encode_serial(const Bytes &serial);      // node serial -> exactly 10 bytes
 std::string serial10_str(const Bytes &serial10);
 std::string probe_serial_str(const Bytes &serial4);   // "1000ABCD", as the app shows it
-Bytes probe_serial_bytes(const std::string &text);    // "1000ABCD" -> 4 bytes LE
+Bytes probe_serial_bytes(const std::string &text);    // "1000ABCD" -> 4 bytes LE, "" if bad
 uint16_t crc16_ccitt(const Bytes &data, uint16_t initial = 0xFFFF);
 
 // Request/response IDs are random. The platform may install its own source
