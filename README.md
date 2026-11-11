@@ -241,6 +241,45 @@ python3 -m host.run field --key <shared key> [--peer <ip>]   # web UI on :8081
   and editable in each unit's web UI. "Reboot" in the web UI restarts the
   process.
 
+### C++ Linux unit (in progress)
+
+`linux/` is the C++ port of the host units, sharing `core/` with the ESP32
+firmware, and adds a standalone role. It talks to BlueZ through GLib's GDBus
+(no bleak, no Python) and serves the same web page with the page built in.
+Build it with the system toolchain and `libglib2.0-dev` (Debian/Ubuntu) or
+`glib-dev` (Alpine):
+
+```
+cmake -S . -B build-sys && cmake --build build-sys -j
+./build-sys/linux/meatnet app        [--config host/app.json]   [--web-port 8080]
+./build-sys/linux/meatnet field      [--config host/field.json] [--web-port 8081] [--peer <ip>]
+./build-sys/linux/meatnet standalone [--config host/standalone.json]
+```
+
+The settings files are the Python units' format; `--peer` and `--key`
+override them without being saved. On start the unit drops any connections
+BlueZ still holds to MeatNet devices or MEATERs (a connected device stops
+advertising, so it would never be heard again). If bluetoothd restarts, the
+unit restarts itself once BlueZ is back, as BlueZ forgets its GATT server and
+advertisements.
+
+**BlueZ setting: turn off EATT.** BlueZ 5.6x opens Enhanced ATT channels to
+every device that connects, and those need an encrypted link, so it asks
+phones to pair. The phone shows a pairing prompt, and unless it's answered
+the link drops after the 30 s security timeout, over and over, so a probe's
+history never finishes uploading. Allow plain ATT only in
+`/etc/bluetooth/main.conf` and restart bluetoothd:
+
+```ini
+[GATT]
+Channels=1
+```
+
+(The ESP32's NimBLE doesn't use EATT.) Probe links from Linux also can't
+grant a probe's 500-1000 ms idle interval (the kernel caps intervals a device
+asks for at the adapter's maximum, 50 ms by default), so probes stay on a
+faster interval and use a little more battery than with an ESP32.
+
 ### C++ field unit (ESP-IDF, in progress)
 
 `firmware/` is a C++ port of the field unit on ESP-IDF + NimBLE. It speaks

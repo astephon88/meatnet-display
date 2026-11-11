@@ -21,6 +21,16 @@
 
 namespace split {
 
+// Keeps sockets from leaking into a re-exec'd process (the Linux unit's
+// "Reboot"). lwIP has no exec, nor these flags.
+static int cloexec(int fd)
+{
+#if defined(F_SETFD) && defined(FD_CLOEXEC)
+    if (fd >= 0) fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
+    return fd;
+}
+
 using core::ticks_ms;
 
 // -- codec ---------------------------------------------------------------------------------
@@ -393,7 +403,7 @@ bool SplitClient::find_app(std::string &host)
         host = cfg_.peer;
         return true;
     }
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int fd = cloexec(socket(AF_INET, SOCK_DGRAM, 0));
     if (fd < 0) return false;
     int yes = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -439,7 +449,7 @@ void SplitClient::session(const std::string &host)
         logf("[split] can't resolve app unit '%s'", host.c_str());
         return;
     }
-    int fd = socket(res->ai_family, res->ai_socktype, 0);
+    int fd = cloexec(socket(res->ai_family, res->ai_socktype, 0));
     if (fd < 0) {
         freeaddrinfo(res);
         return;
@@ -882,7 +892,7 @@ void SplitServer::logf(const char *fmt, ...)
 
 void SplitServer::run()
 {
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    int lfd = cloexec(socket(AF_INET, SOCK_STREAM, 0));
     int yes = 1;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
     struct sockaddr_in a = {};
@@ -896,7 +906,7 @@ void SplitServer::run()
     }
     int bfd = -1;
     if (cfg_.beacon) {
-        bfd = socket(AF_INET, SOCK_DGRAM, 0);
+        bfd = cloexec(socket(AF_INET, SOCK_DGRAM, 0));
         if (bfd >= 0) setsockopt(bfd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
     }
 
@@ -939,7 +949,7 @@ void SplitServer::run()
         if (sel > 0 && FD_ISSET(lfd, &rs)) {
             struct sockaddr_in from = {};
             socklen_t fl = sizeof(from);
-            int fd = accept(lfd, reinterpret_cast<struct sockaddr *>(&from), &fl);
+            int fd = cloexec(accept(lfd, reinterpret_cast<struct sockaddr *>(&from), &fl));
             if (fd >= 0) {
                 char ip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));

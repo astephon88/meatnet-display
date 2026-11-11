@@ -234,7 +234,8 @@ void start(const core::Pins &pins, std::function<sd::View()> view)
     g_pins = pins;
     g_done = xSemaphoreCreateBinary();
     g_view = std::move(view);
-    xTaskCreate(task, "screen", 4096, nullptr, 3, nullptr);
+    // Building a page (status JSON, readings, primitives) peaks at ~4.1 KB.
+    xTaskCreate(task, "screen", 8192, nullptr, 3, nullptr);
 }
 
 }  // namespace screen

@@ -6,3 +6,4 @@ host/*.json
 HANDOFF.md
 CLAUDE.md
 /build/
+/build-sys/
