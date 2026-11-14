@@ -1,6 +1,6 @@
 # MeatNet app unit in a KubeVirt VM: Alpine's cloud image, set up by
-# cloud-init on first boot (Bluetooth kernel, BlueZ, the C++ unit built from
-# this repository), with the USB Bluetooth adapter passed through. The field
+# cloud-init on first boot (Bluetooth kernel, BlueZ, the C++ unit from this
+# repository's GitHub releases), with the USB Bluetooth adapter passed through. The field
 # unit dials the Service's LoadBalancer IP (split_peer on its settings page).
 #
 # Needs KubeVirt with USB passthrough for the adapter (see
@@ -10,11 +10,12 @@
 # keep seeing the same Display.
 serial: ""
 
-# The unit is built from this repository at this ref (branch, tag or commit)
-# on first boot, and rebuilt at boot whenever the ref changes.
+# The unit comes from this release (a tag with the meatnet-linux-x86_64
+# asset, built by .github/workflows/linux-unit.yml). It is downloaded on
+# first boot, and again at boot whenever the version changes.
 source:
   repo: https://github.com/astephon88/meatnet-display
-  gitRef: main
+  version: v0.9.0
 
 # Extra settings for the seeded app.json (written when the settings disk has
 # none; after that the web UI owns the file), e.g. upstream_node: ["G000001CA8"].
@@ -35,10 +36,10 @@ bluetooth:
 vm:
   # Alpine's NoCloud image with cloud-init, imported by CDI.
   image: https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.7-x86_64-bios-cloudinit-r0.qcow2
-  rootDiskSize: 2Gi
+  rootDiskSize: 1Gi
   storageClass: ""                # must attach on the node with the adapter
   cpus: 2
-  memory: 1Gi                     # building the unit on first boot needs most of it
+  memory: 192Mi                   # the unit ~9 MB, bluetoothd ~6 MB, Alpine the rest
   # SSH public keys for the "alpine" user (console access works without).
   sshAuthorizedKeys: []
   nodeSelector: {}

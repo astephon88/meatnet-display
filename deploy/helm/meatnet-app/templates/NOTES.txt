@@ -1,14 +1,14 @@
 MeatNet app unit {{ .Values.serial }} in VirtualMachine {{ include "meatnet-app.fullname" . }}.
 
 First boot takes a few minutes: cloud-init installs a Bluetooth kernel and
-BlueZ, reboots, and the meatnet service builds the unit ({{ .Values.source.gitRef }}).
+BlueZ, reboots, and the meatnet service downloads the unit ({{ .Values.source.version }}).
 Watch it on the console:  virtctl console {{ include "meatnet-app.fullname" . }}
 To log in, set vm.sshAuthorizedKeys and use virtctl ssh alpine@vm/{{ include "meatnet-app.fullname" . }}.
-The unit logs to /var/log/meatnet.log (build: /var/log/meatnet-build.log).
+The unit logs to /var/log/meatnet.log (download: /var/log/meatnet-fetch.log).
 
 Point the field unit (its settings page, "App unit address") at:
   kubectl get svc {{ include "meatnet-app.fullname" . }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
 The web UI is on the same address, port {{ .Values.service.webPort }}.
 
-To move to a newer version, change source.gitRef and restart the VM
-(virtctl restart {{ include "meatnet-app.fullname" . }}): it rebuilds at boot.
+To move to a newer version, change source.version and restart the VM
+(virtctl restart {{ include "meatnet-app.fullname" . }}): it downloads it at boot.

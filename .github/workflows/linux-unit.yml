@@ -1,0 +1,39 @@
+# Builds the Linux unit for the app unit's VM (Alpine 3.21, x86_64) and
+# attaches it to the tag's GitHub release; the VM downloads it by tag
+# (source.version in deploy/helm/meatnet-app).
+name: Linux unit release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and attach
+        required: true
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Build and test in Alpine 3.21 (the VM's base)
+        run: |
+          docker run --rm -v "$PWD:/s" -w /s alpine:3.21 sh -ec '
+            apk add -q cmake make g++ glib-dev
+            cmake -S . -B /tmp/b -DCMAKE_BUILD_TYPE=Release
+            cmake --build /tmp/b -j"$(nproc)"
+            /tmp/b/tests/core_tests
+            strip -o meatnet-linux-x86_64 /tmp/b/linux/meatnet'
+          sha256sum meatnet-linux-x86_64 > meatnet-linux-x86_64.sha256
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --title "$TAG" --notes "Linux unit for the app unit's VM (Alpine 3.21, x86_64)."
+          gh release upload "$TAG" meatnet-linux-x86_64 meatnet-linux-x86_64.sha256 --clobber

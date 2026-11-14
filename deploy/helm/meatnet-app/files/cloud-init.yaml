@@ -1,7 +1,7 @@
 #cloud-config
 # First boot of the app unit's VM (Alpine's NoCloud image): a kernel with
 # Bluetooth (linux-virt has none), the adapter's firmware, BlueZ without EATT,
-# and the meatnet service, which builds the unit and runs it. Reboots once.
+# and the meatnet service, which downloads the unit and runs it. Reboots once.
 package_update: true
 packages:
   - linux-firmware-rtl_bt
@@ -9,11 +9,8 @@ packages:
   - bluez
   - dbus
   - e2fsprogs
-  - git
-  - cmake
-  - make
-  - g++
-  - glib-dev
+  - glib
+  - libstdc++
 write_files:
   # EATT channels need an encrypted link, so BlueZ would ask every phone to
   # pair, and the phone drops the link after the 30 s security timeout.
@@ -43,20 +40,20 @@ write_files:
               mount "$d" /var/lib/meatnet || return 1
           fi
       }
-  - path: /usr/local/sbin/meatnet-build
+  - path: /usr/local/sbin/meatnet-fetch
     permissions: "0755"
     content: |
       #!/bin/sh
-      # meatnet-build REPO REF: build the Linux unit and install it.
+      # meatnet-fetch URL VERSION: download the release's Linux unit, check
+      # its SHA-256 and install it.
       set -e
-      repo=$1 ref=$2 src=/var/cache/meatnet/src
-      rm -rf "$src" && mkdir -p "$src" && cd "$src"
-      git init -q && git fetch -q --depth 1 "$repo" "$ref" && git checkout -q FETCH_HEAD
-      cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
-      cmake --build build --target meatnet -j"$(nproc)"
-      install -m 0755 build/linux/meatnet /usr/local/bin/meatnet
-      mkdir -p /etc/meatnet && printf '%s\n' "$ref" > /etc/meatnet/built-ref
-      cd / && rm -rf "$src"
+      url=$1 version=$2 dir=/var/cache/meatnet
+      rm -rf "$dir" && mkdir -p "$dir" && cd "$dir"
+      wget -q "$url/meatnet-linux-x86_64" "$url/meatnet-linux-x86_64.sha256"
+      sha256sum -c meatnet-linux-x86_64.sha256
+      install -m 0755 meatnet-linux-x86_64 /usr/local/bin/meatnet
+      mkdir -p /etc/meatnet && printf '%s\n' "$version" > /etc/meatnet/version
+      cd / && rm -rf "$dir"
   - path: /etc/init.d/meatnet
     permissions: "0755"
     content: |
@@ -76,11 +73,11 @@ write_files:
       start_pre() {
           . /usr/local/lib/meatnet/disks.sh
           mount_disks || return 1
-          repo=$(cat /run/meatnet/config/repo) ref=$(cat /run/meatnet/config/ref)
-          if [ "$(cat /etc/meatnet/built-ref 2>/dev/null)" != "$ref" ]; then
-              ebegin "Building the unit at $ref (a few minutes)"
-              /usr/local/sbin/meatnet-build "$repo" "$ref" >/var/log/meatnet-build.log 2>&1
-              eend $? "build failed, see /var/log/meatnet-build.log" || [ -x "$command" ] || return 1
+          url=$(cat /run/meatnet/config/url) version=$(cat /run/meatnet/config/version)
+          if [ "$(cat /etc/meatnet/version 2>/dev/null)" != "$version" ]; then
+              ebegin "Installing the unit $version"
+              /usr/local/sbin/meatnet-fetch "$url" "$version" >/var/log/meatnet-fetch.log 2>&1
+              eend $? "download failed, see /var/log/meatnet-fetch.log" || [ -x "$command" ] || return 1
           fi
           [ -f /var/lib/meatnet/app.json ] || cp /run/meatnet/config/seed.json /var/lib/meatnet/app.json
           command_args="app --config /var/lib/meatnet/app.json --web-port 8080 --key-file /run/meatnet/key/$(cat /run/meatnet/config/keyfile)"
