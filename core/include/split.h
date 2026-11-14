@@ -1,4 +1,4 @@
-// Two-unit mode (port of split.py): a phone-side "app" unit and a
+// Two-unit mode: a phone-side "app" unit and a
 // device-side "field" unit coordinating over WiFi.
 //
 // The field unit is a remote radio: it scans and holds the outbound BLE links

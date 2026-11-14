@@ -1,6 +1,5 @@
 // Shared test helpers: byte builders, sample probe data, and the fake
-// transport/link the Node tests drive (ports of tests/test_protocol.py's
-// helpers and tests/test_meatnet.py's fakes).
+// transport/link the Node tests drive.
 #pragma once
 
 #include <cmath>

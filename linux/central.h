@@ -1,5 +1,4 @@
-// The Linux unit's scanning and outbound links on BlueZ (port of
-// host/bleak_central.py, without bleak): a split::FieldSource, so the field
+// The Linux unit's scanning and outbound links on BlueZ: a split::FieldSource, so the field
 // role streams it to the app unit and the standalone role's transport reads
 // it directly.
 //

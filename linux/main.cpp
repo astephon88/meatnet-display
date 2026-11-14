@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -63,6 +64,9 @@ std::string read_file(const std::string &path)
 
 bool write_file(const std::string &path, const std::string &text)
 {
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::path(path).parent_path();
+    if (!dir.empty()) std::filesystem::create_directories(dir, ec);     // e.g. host/ in a fresh clone
     std::string tmp = path + ".tmp";
     {
         std::ofstream f(tmp);

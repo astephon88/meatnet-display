@@ -1,5 +1,4 @@
-// Configured readings + live MeatNet data -> display items (port of
-// readings.py). Works on the /api/state tables (core::node_status), so the
+// Configured readings + live MeatNet data -> display items. Works on the /api/state tables (core::node_status), so the
 // screen and the web page see the same data. A reading is a Settings
 // Reading: dev "probe:<serial>" or "node:<serial>", a field, an optional label.
 #pragma once

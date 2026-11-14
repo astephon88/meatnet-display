@@ -37,7 +37,7 @@ const sd::Fonts &fonts()
 
 static core::Pins g_pins;
 
-// -- GC9A01A over SPI (init sequence from display.py / TFT_eSPI) ----------------------
+// -- GC9A01A over SPI (init sequence from TFT_eSPI) ----------------------
 
 static esp_lcd_panel_io_handle_t g_io;
 static SemaphoreHandle_t g_done;

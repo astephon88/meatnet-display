@@ -1,5 +1,5 @@
-// Unit settings: the keys and defaults of config.py's DEFAULTS, plus the
-// C++ field unit's radio settings. Loading/saving them (JSON in NVS or a
+// Unit settings: every unit's keys and defaults (the JSON format the web
+// page and the settings files use), radio settings included. Loading/saving them (JSON in NVS or a
 // file) is the platform's job; the Node and the rest of core read this.
 #pragma once
 
@@ -83,12 +83,11 @@ void merge_settings(Settings &s, const cJSON *obj);
 void merge_settings(Settings &s, const std::string &json);
 
 // All keys in config.json format. With `secrets` false, split_key,
-// wifi_password and ap_password become "<name>_set": true/false (web.py's
-// _SECRET).
+// wifi_password and ap_password become "<name>_set": true/false.
 cJSON *settings_to_json(const Settings &s, bool secrets);
 
 // A settings change from the web page (POST /api/config): checks every key
-// present (unknown keys are ignored, as web.py does) and applies them all,
+// present (unknown keys are ignored) and applies them all,
 // or none with `err` set. `reboot` tells whether a changed key only takes
 // effect after a restart. Secrets: an empty split_key keeps the saved one;
 // wifi_password and ap_password may be "" (open network) or 8-63 characters.

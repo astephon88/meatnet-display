@@ -1,5 +1,11 @@
 # Plan: C++ field unit on ESP-IDF
 
+> **Done, kept for history.** This was the plan for the first C++ unit, the
+> field unit, when the rest of the project was MicroPython. Every role now
+> runs on the shared C++ core (ESP32 firmware and Linux unit) and the
+> MicroPython and Python code is gone; see the README for the current
+> state. References below to `.py` files describe that earlier code.
+
 ## Why
 
 In the two-unit setup the field unit does all the device-side Bluetooth work:

@@ -1,4 +1,3 @@
-// Port of tests/test_readings.py.
 #include <algorithm>
 
 #include "cJSON.h"

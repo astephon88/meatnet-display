@@ -1,5 +1,4 @@
-// MEATER Pro -> MeatNet bridge: decoding and Combustion advert synthesis
-// (port of meater.py).
+// MEATER Pro -> MeatNet bridge: decoding and Combustion advert synthesis.
 //
 // The MEATER Pro sends its temperatures only over a GATT connection: the
 // temperature characteristic notifies 12 bytes = six little-endian uint16

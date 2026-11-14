@@ -1,4 +1,3 @@
-// Port of tests/test_power.py.
 #include "doctest.h"
 #include "helpers.h"
 #include "power.h"

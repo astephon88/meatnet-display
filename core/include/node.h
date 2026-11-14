@@ -1,4 +1,4 @@
-// MeatNet node logic for the Display/repeater (port of meatnet.py).
+// MeatNet node logic for the Display/repeater.
 //
 // The Node sits between the radio transport and the rest of the unit:
 // - decodes scan observations into a probe table and a device table;

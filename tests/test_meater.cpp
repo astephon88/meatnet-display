@@ -1,4 +1,3 @@
-// Port of tests/test_meater.py.
 #include <algorithm>
 #include <cmath>
 

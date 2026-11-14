@@ -1,4 +1,3 @@
-// Port of tests/test_meatnet.py.
 #include <algorithm>
 #include <set>
 

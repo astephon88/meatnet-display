@@ -1,4 +1,4 @@
-// The round screen's pages (port of screen.py's drawing): readings::Item
+// The round screen's pages: readings::Item
 // pages laid out for the 240x240 GC9A01A as a list of primitives, which
 // raster() turns into RGB565 rows a band at a time (a whole frame would need
 // 115 KB of RAM on the ESP32).

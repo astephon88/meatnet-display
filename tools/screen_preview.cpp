@@ -1,9 +1,7 @@
 // Renders the round screen's pages on the host (core/screen_draw, the code
 // the firmware runs) for a sample status, as PPM images:
 //
-//     ./build/tools/screen_preview [out_dir]      (default docs/preview)
-//
-// Same pages as tools/preview.py renders for the MicroPython screen.
+//     ./build/screen_preview [out_dir]      (default docs/preview)
 #include <cstdio>
 #include <fstream>
 #include <iterator>

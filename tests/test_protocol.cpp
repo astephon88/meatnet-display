@@ -1,4 +1,3 @@
-// Port of tests/test_protocol.py.
 #include <cmath>
 #include <cstring>
 

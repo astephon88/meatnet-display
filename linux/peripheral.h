@@ -1,5 +1,4 @@
-// The Linux unit as a BLE peripheral on BlueZ (port of
-// host/bluez_peripheral.py): what phones connect to.
+// The Linux unit as a BLE peripheral on BlueZ: what phones connect to.
 //
 // GATT: Nordic UART (RX write / TX notify) and Device Information, exported
 // as a BlueZ GATT application. Advertising: one BlueZ advertising instance

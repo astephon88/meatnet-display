@@ -1,4 +1,4 @@
-// Small helpers shared across core (port of util.py).
+// Small helpers shared across core.
 #pragma once
 
 #include <cstddef>

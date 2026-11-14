@@ -1,4 +1,4 @@
-// Standby and battery monitoring (port of power.py). The platform supplies
+// Standby and battery monitoring. The platform supplies
 // the hooks: reading the battery ADC, idling the hardware, saving the manual
 // standby flag.
 //

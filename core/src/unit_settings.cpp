@@ -291,7 +291,7 @@ std::string upper(std::string s)
     return s;
 }
 
-// Keys that take effect only after a restart (web.py's _EDITABLE).
+// Keys that take effect only after a restart.
 const std::set<std::string> kRebootKeys = {
     "linked_scan_duty", "screen", "battery_pin", "hostname", "ap_password", "serial", "dis_model",
     "max_conn", "pins", "role", "split_peer", "split_key", "split_port", "wifi_ssid", "wifi_password",

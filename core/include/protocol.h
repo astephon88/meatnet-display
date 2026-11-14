@@ -1,8 +1,8 @@
 // Combustion MeatNet BLE wire formats: advertising data, MeatNet Node UART
 // frames (10/15-byte headers with request IDs), Probe UART frames (6/7-byte
 // headers, no IDs), and the payloads a Display/repeater node sends and
-// receives. Port of protocol.py; byte buffers are std::string, and "no
-// value" is an empty buffer or std::nullopt.
+// receives. Byte buffers are std::string, and "no value" is an empty buffer
+// or std::nullopt.
 #pragma once
 
 #include <array>

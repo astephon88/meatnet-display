@@ -23,6 +23,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "mdns.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -123,7 +124,7 @@ static int log_hook(const char *fmt, va_list args)
 
 static std::string g_role;          // "field", "app" or "standalone" (fixed until a reboot)
 static std::string g_serial;
-static core::Settings g_cfg;            // the node's settings (app and standalone roles)
+static core::Settings g_cfg;            // the settings, as loaded at start (the node task updates its copy)
 
 static void ble_start()
 {
@@ -140,7 +141,6 @@ static void ble_start()
 
 // -- radio task: links + scan pacing (10 Hz) ----------------------------------------
 
-static constexpr int kLinkedScanDuty = 20;     // % while any link is up
 static constexpr int kBurstScanDuty = 5;       // % while a link streams (log reads)
 static constexpr uint32_t kBurstRate = 20;     // notifications/s = "streaming"
 static constexpr int64_t kBurstHoldMs = 5000;
@@ -151,6 +151,7 @@ static void radio_task(void *)
     radio::Links &links = radio::Links::get();
     int64_t rate_at = radio::Radio::now_ms(), burst_until = 0;
     uint32_t rate_count = links.total_rx();
+    const int linked_duty = g_cfg.linked_scan_duty;    // % while any link is up (applied at start)
     while (true) {
         links.tick();
         int64_t now = radio::Radio::now_ms();
@@ -162,7 +163,7 @@ static void radio_task(void *)
             rate_count = total;
         }
         int duty = now < burst_until ? kBurstScanDuty
-                 : links.any_connected() ? kLinkedScanDuty : 50;
+                 : links.any_connected() ? linked_duty : 50;
         r.set_duty(duty);
         if (!links.connecting()) r.ensure_scan();
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -245,6 +246,8 @@ static void sta_retry(void *)
         esp_wifi_connect();
 }
 
+static void mdns_start();
+
 static void wifi_event(void *, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -272,17 +275,32 @@ static void wifi_event(void *, esp_event_base_t base, int32_t id, void *data)
         snprintf(ip, sizeof(ip), IPSTR, IP2STR(&ev->ip_info.ip));
         set_net(g_ip, sizeof(g_ip), ip);
         ESP_LOGI(TAG, "WiFi up, IP %s", ip);
+        mdns_start();
         esp_timer_stop(g_ap_timer);
         setup_ap_stop();
         xEventGroupSetBits(g_events, kWifiUp);
     }
 }
 
+// <hostname>.local, and the web page as an _http._tcp service.
+static void mdns_start()
+{
+    static bool started = false;
+    if (started) return;
+    started = true;
+    if (mdns_init() != ESP_OK) return;
+    mdns_hostname_set(g_cfg.hostname.c_str());
+    mdns_instance_name_set(("MeatNet " + g_serial).c_str());
+    mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
+    ESP_LOGI(TAG, "mDNS: %s.local", g_cfg.hostname.c_str());
+}
+
 static void wifi_start()
 {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t *sta = esp_netif_create_default_wifi_sta();
+    esp_netif_set_hostname(sta, g_cfg.hostname.c_str());     // DHCP; mDNS once WiFi is up
     esp_netif_t *ap = esp_netif_create_default_wifi_ap();
     // The setup network's DHCP hands out the unit itself as DNS server, and
     // the page as captive-portal address (RFC 8910) for phones that ask.
@@ -484,8 +502,8 @@ static void node_task(void *)
             else pm.exit("manual", core::ticks_ms());
             publish(node, *t, pm);
         }
-        // Changes from the web page apply at once, as in web.py (the ones
-        // marked "reboot" only matter at the next start).
+        // Changes from the web page apply at once (the ones marked
+        // "reboot" only matter at the next start).
         if (g_cfg_changed.exchange(false)) {
             core::Settings fresh = settings::get();
             if (fresh.dis_firmware != g_cfg.dis_firmware) t->set_firmware(fresh.dis_firmware);
@@ -574,7 +592,7 @@ static cJSON *field_json()
 }
 
 // /api/state for the web page: the Node's (or the field radio's) tables plus
-// this unit's own state, as web.py builds it.
+// this unit's own state.
 static cJSON *state_json()
 {
     cJSON *o;

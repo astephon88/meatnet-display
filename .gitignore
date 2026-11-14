@@ -1,8 +1,8 @@
+host/*.json
+# local settings of the retired MicroPython unit (may hold WiFi credentials)
 config.json
 links.json
 __pycache__/
-.pytest_cache/
-host/*.json
 HANDOFF.md
 CLAUDE.md
 /build/
