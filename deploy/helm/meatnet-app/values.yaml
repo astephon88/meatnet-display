@@ -15,7 +15,7 @@ serial: ""
 # first boot, and again at boot whenever the version changes.
 source:
   repo: https://github.com/astephon88/meatnet-display
-  version: v0.9.1
+  version: v0.9.2
 
 # Extra settings for the seeded app.json (written when the settings disk has
 # none; after that the web UI owns the file), e.g. upstream_node: ["G000001CA8"].
