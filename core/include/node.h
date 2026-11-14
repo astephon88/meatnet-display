@@ -47,6 +47,9 @@ constexpr int64_t HEARTBEAT_MS = 5000;
 constexpr int64_t SYNC_LIST_MS = 30000;
 constexpr int64_t FWD_TIMEOUT_MS = 15000;
 constexpr int64_t TABLE_PULL_MS = 30 * 60000;   // pull a peer's link table at most this often
+// A link down this long whose device hasn't advertised meanwhile (switched
+// off, out of range) is closed; it reopens when the device is heard again.
+constexpr int64_t LINK_GIVE_UP_MS = 30000;
 constexpr int64_t MEATER_FRESH_MS = 10000;  // stop advertising a MEATER this long after its
                                             // last temperature notification
 constexpr uint16_t MEATER_SAMPLE_MS = 5000; // log period of a bridged MEATER (like a probe)
@@ -194,6 +197,7 @@ public:
     std::map<Bytes, Bytes> link_buf;
     std::map<Bytes, std::string> link_state;
     std::map<Bytes, int64_t> table_pulled;
+    std::map<Bytes, int64_t> link_down_since;   // links not up, since when
     std::map<Bytes, MeaterData> meater_data;
     std::map<Bytes, MeaterSession> meater_sess;
     std::vector<LogJob> log_jobs;   // paced log-read replies for bridged MEATERs
@@ -231,6 +235,7 @@ private:
     std::optional<int> assign_slot(const Bytes &serial4);
     int node_number(const Bytes &serial10);
     void manage_links(int64_t now);
+    void give_up_silent_links(int64_t now);
     void on_node_link_ready(const Bytes &key);
     void update_adverts(int64_t now);
     bool log_read_active(const Bytes &serial4) const;

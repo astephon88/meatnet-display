@@ -661,8 +661,9 @@ int Node::node_number(const Bytes &serial10)
 
 // -- links ---------------------------------------------------------------------------------------------
 
-void Node::manage_links(int64_t)
+void Node::manage_links(int64_t now)
 {
+    give_up_silent_links(now);
     std::vector<Bytes> wanted = wanted_probes();
     auto meaters = meater_selected();
     int budget = link_budget();
@@ -704,6 +705,36 @@ void Node::manage_links(int64_t)
         auto obs = t.nodes.find(up);
         if (obs != t.nodes.end()) t.open_link(up, "node", obs->second.addr_type, obs->second.addr);
     }
+}
+
+// Links whose device has gone quiet: without this the radio would retry a
+// switched-off device for ever. A connected device stops advertising, so
+// only links that are down count, and a device that dropped briefly is heard
+// again well within LINK_GIVE_UP_MS.
+void Node::give_up_silent_links(int64_t now)
+{
+    std::vector<std::pair<Bytes, std::string>> quiet;
+    for (auto &kv : t.links) {
+        const Link &l = *kv.second;
+        if (l.ready()) {
+            link_down_since.erase(kv.first);
+            continue;
+        }
+        int64_t since = link_down_since.emplace(kv.first, now).first->second;
+        if (now - since < LINK_GIVE_UP_MS) continue;
+        const auto &table = l.kind() == "probe" ? t.direct : l.kind() == "meater" ? t.meaters : t.nodes;
+        auto obs = table.find(kv.first);
+        if (obs == table.end() || now - obs->second.ticks >= LINK_GIVE_UP_MS)
+            quiet.push_back({kv.first, l.kind()});
+    }
+    for (auto &q : quiet) {
+        logf("[link] %s %s: not heard for %ds, stopped until it advertises again", q.second.c_str(),
+             link_name(q.first, *t.links[q.first]).c_str(), static_cast<int>(LINK_GIVE_UP_MS / 1000));
+        t.close_link(q.first);
+        link_down_since.erase(q.first);
+    }
+    for (auto it = link_down_since.begin(); it != link_down_since.end();)
+        it = t.links.count(it->first) ? std::next(it) : link_down_since.erase(it);
 }
 
 void Node::on_node_link_ready(const Bytes &key)

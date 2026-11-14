@@ -553,3 +553,40 @@ TEST_CASE("a flooded message is not echoed back to the connection it came from")
     CHECK(r.t.sent[0].second == std::vector<int>{2});
     CHECK(one_frame(r.t.sent[0].first).payload[17] == 1);   // one hop further
 }
+
+TEST_CASE("a link to a device that stopped advertising is closed, and reopened when it's heard")
+{
+    Rig r(linked_cfg());
+    hear_probe(r.t, 0);
+    r.n->tick(0);
+    REQUIRE(r.t.links.count(PROBE));
+    auto link = std::static_pointer_cast<FakeLink>(r.t.links[PROBE]);
+    link->state_ = "ready";
+    r.n->tick(1000);
+    r.t.direct.clear();                         // a connected probe stops advertising
+    r.n->tick(120000);
+    CHECK(r.t.links.count(PROBE));              // up: never closed for being quiet
+    link->state_ = "error: disconnected";       // switched off
+    r.n->tick(121000);
+    r.n->tick(140000);
+    CHECK(r.t.links.count(PROBE));              // not down long enough yet
+    r.n->tick(151000);
+    CHECK_FALSE(r.t.links.count(PROBE));        // down 30 s and not heard: stopped
+    hear_probe(r.t, 160000);
+    r.n->tick(160000);
+    CHECK(r.t.links.count(PROBE));              // advertising again: back
+}
+
+TEST_CASE("a link that drops but is heard again isn't closed")
+{
+    Rig r(linked_cfg());
+    hear_probe(r.t, 0);
+    r.n->tick(0);
+    auto link = std::static_pointer_cast<FakeLink>(r.t.links[PROBE]);
+    link->state_ = "connecting";                // retrying, the probe still advertising
+    for (int64_t t = 1000; t <= 90000; t += 1000) {
+        hear_probe(r.t, t);
+        r.n->tick(t);
+    }
+    CHECK(r.t.links.count(PROBE));
+}
