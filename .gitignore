@@ -7,3 +7,7 @@ HANDOFF.md
 CLAUDE.md
 /build/
 /build-sys/
+
+# editor swap files
+*.swp
+*.swo
