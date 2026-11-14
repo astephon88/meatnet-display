@@ -315,6 +315,9 @@ order matters:
 1. Start the flash first, with esptool set to keep retrying the connection:
    `python -m esptool --chip esp32s3 -p /dev/serial/by-id/<CH343 device>
    --connect-attempts 0 write_flash @flash_args` (from `firmware/build`).
+   Without ESP-IDF, take `meatnet-esp32s3.bin` from a GitHub release (built
+   by `.github/workflows/build.yml`) and use `write_flash 0x0
+   meatnet-esp32s3.bin` instead of `@flash_args`.
 2. **Then** hold BOOT, press and release RESET, release BOOT. esptool
    connects and writes.
 3. Afterwards, press RESET to run the new firmware. If it keeps landing in

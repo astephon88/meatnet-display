@@ -1,0 +1,77 @@
+# Builds the Linux unit (Alpine 3.21, x86_64: the app unit's VM) and the
+# ESP32-S3 firmware on every push and pull request. On a v* tag both go to
+# the tag's GitHub release; the VM downloads the Linux unit by tag
+# (source.version in deploy/helm/meatnet-app).
+name: Build
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and attach to its release
+        required: true
+permissions:
+  contents: write
+env:
+  REF: ${{ inputs.tag || github.ref }}
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - name: Build and test in Alpine 3.21 (the VM's base)
+        run: |
+          docker run --rm -v "$PWD:/s" -w /s alpine:3.21 sh -ec '
+            apk add -q cmake make g++ glib-dev
+            cmake -S . -B /tmp/b -DCMAKE_BUILD_TYPE=Release
+            cmake --build /tmp/b -j"$(nproc)"
+            /tmp/b/tests/core_tests
+            strip -o meatnet-linux-x86_64 /tmp/b/linux/meatnet'
+          sha256sum meatnet-linux-x86_64 > meatnet-linux-x86_64.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: meatnet-linux-x86_64*
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      # The board's own sdkconfig (git-ignored) isn't needed: settings live in
+      # NVS, the build only takes sdkconfig.defaults. One image to flash at 0x0.
+      - name: Build with ESP-IDF v5.5.6
+        run: |
+          docker run --rm -v "$PWD:/s" -w /s/firmware espressif/idf:v5.5.6 bash -ec '
+            idf.py -DIDF_TARGET=esp32s3 build
+            cd build && esptool.py --chip esp32s3 merge_bin -o /s/meatnet-esp32s3.bin @flash_args'
+          sha256sum meatnet-esp32s3.bin > meatnet-esp32s3.bin.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: meatnet-esp32s3.bin*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag
+    needs: [linux, firmware]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Attach to the release
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --title "$TAG" --notes "Linux unit for the app unit's VM (Alpine 3.21, x86_64) and ESP32-S3 firmware (flash meatnet-esp32s3.bin at 0x0)."
+          gh release upload "$TAG" meatnet-linux-x86_64 meatnet-linux-x86_64.sha256 \
+            meatnet-esp32s3.bin meatnet-esp32s3.bin.sha256 --clobber

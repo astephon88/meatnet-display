@@ -11,7 +11,7 @@
 serial: ""
 
 # The unit comes from this release (a tag with the meatnet-linux-x86_64
-# asset, built by .github/workflows/linux-unit.yml). It is downloaded on
+# asset, built by .github/workflows/build.yml). It is downloaded on
 # first boot, and again at boot whenever the version changes.
 source:
   repo: https://github.com/astephon88/meatnet-display
