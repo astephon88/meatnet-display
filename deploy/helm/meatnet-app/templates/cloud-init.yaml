@@ -1,0 +1,16 @@
+# The VM's cloud-init user data (files/cloud-init.yaml), in a Secret: KubeVirt
+# takes at most 2048 bytes inline.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "meatnet-app.fullname" . }}-cloud-init
+  labels:
+    {{- include "meatnet-app.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  userdata: |
+    {{- .Files.Get "files/cloud-init.yaml" | nindent 4 }}
+    {{- with .Values.vm.sshAuthorizedKeys }}
+    ssh_authorized_keys:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}

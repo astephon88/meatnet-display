@@ -22,11 +22,14 @@ static const char *kSvcXml =
 static const char *kRootXml =
     "<interface name='org.freedesktop.DBus.ObjectManager'>"
     "<method name='GetManagedObjects'><arg type='a{oa{sa{sv}}}' direction='out'/></method></interface>";
+// No Discoverable property: with it (even false) BlueZ 5.79 adds a flags
+// field, which pushes our 30 bytes past a legacy advertisement's 31, so the
+// kernel sends an extended one, and the Combustion app (like most Android
+// scans) only sees legacy advertisements.
 static const char *kAdXml =
     "<interface name='org.bluez.LEAdvertisement1'><method name='Release'/>"
     "<property name='Type' type='s' access='read'/><property name='ManufacturerData' type='a{qv}' access='read'/>"
-    "<property name='ServiceUUIDs' type='as' access='read'/>"
-    "<property name='Discoverable' type='b' access='read'/></interface>";
+    "<property name='ServiceUUIDs' type='as' access='read'/></interface>";
 
 static GVariant *strv(const std::vector<std::string> &v)
 {
@@ -362,7 +365,6 @@ void Peripheral::next_ad_op()
             return g_variant_builder_end(&b);
         }
         if (!strcmp(prop, "ServiceUUIDs")) return strv({"fe59"});
-        if (!strcmp(prop, "Discoverable")) return g_variant_new_boolean(FALSE);
         return nullptr;
     };
     ad->h.call = [](const char *, GVariant *, GDBusMethodInvocation *inv) {

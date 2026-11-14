@@ -92,9 +92,5 @@ spec:
             secretName: {{ include "meatnet-app.secretName" . }}
         - name: cloudinit
           cloudInitNoCloud:
-            userData: |
-              {{- .Files.Get "files/cloud-init.yaml" | nindent 14 }}
-              {{- with .Values.vm.sshAuthorizedKeys }}
-              ssh_authorized_keys:
-                {{- toYaml . | nindent 16 }}
-              {{- end }}
+            secretRef:
+              name: {{ $name }}-cloud-init
