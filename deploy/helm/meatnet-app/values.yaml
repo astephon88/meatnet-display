@@ -1,0 +1,56 @@
+# MeatNet app unit in a KubeVirt VM: Alpine's cloud image, set up by
+# cloud-init on first boot (Bluetooth kernel, BlueZ, the C++ unit built from
+# this repository), with the USB Bluetooth adapter passed through. The field
+# unit dials the Service's LoadBalancer IP (split_peer on its settings page).
+#
+# Needs KubeVirt with USB passthrough for the adapter (see
+# deploy/kubevirt/usb-passthrough.yaml) and CDI (the disks are DataVolumes).
+
+# Display serial the unit advertises (10 characters). Required, so phones
+# keep seeing the same Display.
+serial: ""
+
+# The unit is built from this repository at this ref (branch, tag or commit)
+# on first boot, and rebuilt at boot whenever the ref changes.
+source:
+  repo: https://github.com/astephon88/meatnet-display
+  gitRef: main
+
+# Extra settings for the seeded app.json (written when the settings disk has
+# none; after that the web UI owns the file), e.g. upstream_node: ["G000001CA8"].
+config: {}
+
+# Shared key the field unit must present. Use an existing Secret, or set
+# value to have the chart create one. Passed to the unit at every start,
+# never written to the settings disk.
+splitKey:
+  existingSecret: ""
+  secretKey: key
+  value: ""
+
+bluetooth:
+  # The KubeVirt resource for the adapter (permittedHostDevices.usb).
+  resourceName: kubevirt.io/usb-bluetooth
+
+vm:
+  # Alpine's NoCloud image with cloud-init, imported by CDI.
+  image: https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.7-x86_64-bios-cloudinit-r0.qcow2
+  rootDiskSize: 2Gi
+  storageClass: ""                # must attach on the node with the adapter
+  cpus: 2
+  memory: 1Gi                     # building the unit on first boot needs most of it
+  # SSH public keys for the "alpine" user (console access works without).
+  sshAuthorizedKeys: []
+  nodeSelector: {}
+  tolerations: []
+
+settings:
+  size: 64Mi                      # app.json and app-links.json
+
+service:
+  type: LoadBalancer
+  loadBalancerIP: ""
+  annotations: {}                 # e.g. metallb.universe.tf/loadBalancerIPs
+  externalTrafficPolicy: Local    # keeps the field unit's real address
+  splitPort: 7389
+  webPort: 8080

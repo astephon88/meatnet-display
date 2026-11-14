@@ -1,4 +1,5 @@
 // Port of tests/test_split.py (the field status view comes with the web UI).
+#include <algorithm>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>

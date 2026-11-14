@@ -1,0 +1,6 @@
+apiVersion: v2
+name: meatnet-app
+description: MeatNet Display app unit (phone side of the two-unit split) in an Alpine VM on KubeVirt, with a USB Bluetooth adapter passed through
+type: application
+version: 0.2.0
+appVersion: "main"

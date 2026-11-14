@@ -1,7 +1,7 @@
 // MeatNet unit on a Linux host (BlueZ): the app, field or standalone role.
 //
 //     meatnet app        [--config host/app.json]   [--web-port 8080] [--adapter hci0]
-//     meatnet field      [--config host/field.json] [--web-port 8081] [--peer HOST] [--key KEY]
+//     meatnet field      [--config host/field.json] [--web-port 8081] [--peer HOST] [--key KEY | --key-file FILE]
 //     meatnet standalone [--config host/standalone.json] [--web-port 8080]
 //
 // The Node (app and standalone roles) and all D-Bus work run on the GLib main
@@ -179,6 +179,12 @@ bool parse(int argc, char **argv, Options &o)
         else if (a == "--adapter" && next(v)) o.adapter = v;
         else if (a == "--peer" && next(v)) o.peer = v;
         else if (a == "--key" && next(v)) o.key = v;
+        else if (a == "--key-file" && next(v)) {
+            // Keeps the key off the command line (e.g. a mounted Secret).
+            std::string k = read_file(v);
+            while (!k.empty() && (k.back() == '\n' || k.back() == '\r')) k.pop_back();
+            o.key = k;
+        }
         else if (a[0] != '-' && o.role.empty()) o.role = a;
         else return false;
     }
@@ -202,7 +208,7 @@ int main(int argc, char **argv)
     Options opt;
     if (!parse(argc, argv, opt)) {
         fprintf(stderr, "usage: %s app|field|standalone [--config FILE] [--web-port N] [--adapter hciN] "
-                        "[--peer HOST] [--key KEY]\n", argv[0]);
+                        "[--peer HOST] [--key KEY | --key-file FILE]\n", argv[0]);
         return 2;
     }
     g_argv = argv;

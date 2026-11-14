@@ -1,0 +1,25 @@
+# The field unit dials this Service's IP (split_peer on its settings page);
+# the web UI is on the same IP. It selects the VM's virt-launcher pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "meatnet-app.fullname" . }}
+  labels:
+    {{- include "meatnet-app.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- with .Values.service.loadBalancerIP }}
+  loadBalancerIP: {{ . }}
+  {{- end }}
+  {{- if has .Values.service.type (list "LoadBalancer" "NodePort") }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    {{- include "meatnet-app.selectorLabels" . | nindent 4 }}
+  ports:
+    - {name: split, port: {{ .Values.service.splitPort }}, targetPort: 7389, protocol: TCP}
+    - {name: web, port: {{ .Values.service.webPort }}, targetPort: 8080, protocol: TCP}

@@ -1,0 +1,15 @@
+# Read by the VM at every boot (attached as a disk): where to build the unit
+# from, and the settings to seed when the settings disk has none.
+{{- $serial := required "set serial (the Display serial the unit advertises)" .Values.serial -}}
+{{- if gt (len $serial) 10 }}{{ fail "serial is at most 10 characters" }}{{ end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "meatnet-app.fullname" . }}
+  labels:
+    {{- include "meatnet-app.labels" . | nindent 4 }}
+data:
+  repo: {{ .Values.source.repo | quote }}
+  ref: {{ .Values.source.gitRef | quote }}
+  keyfile: {{ .Values.splitKey.secretKey | quote }}   # the key's file on the Secret's disk
+  seed.json: {{ merge (dict "serial" $serial "role" "app") .Values.config | toJson | quote }}

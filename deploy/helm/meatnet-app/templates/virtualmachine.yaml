@@ -1,0 +1,100 @@
+{{- $name := include "meatnet-app.fullname" . -}}
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meatnet-app.labels" . | nindent 4 }}
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+    - metadata:
+        name: {{ $name }}-root
+      spec:
+        source:
+          http:
+            url: {{ .Values.vm.image | quote }}
+        storage:
+          {{- with .Values.vm.storageClass }}
+          storageClassName: {{ . }}
+          {{- end }}
+          resources:
+            requests:
+              storage: {{ .Values.vm.rootDiskSize }}
+    - metadata:
+        name: {{ $name }}-settings
+      spec:
+        source:
+          blank: {}
+        storage:
+          {{- with .Values.vm.storageClass }}
+          storageClassName: {{ . }}
+          {{- end }}
+          resources:
+            requests:
+              storage: {{ .Values.settings.size }}
+  template:
+    metadata:
+      labels:
+        {{- include "meatnet-app.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.vm.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vm.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      domain:
+        cpu:
+          cores: {{ .Values.vm.cpus }}
+        memory:
+          guest: {{ .Values.vm.memory }}
+        devices:
+          # The start script finds the extra disks by these serials.
+          disks:
+            - name: root
+              bootOrder: 1
+              disk: {bus: virtio}
+            - name: settings
+              serial: meatnet-settings
+              disk: {bus: virtio}
+            - name: config
+              serial: meatnet-config
+              disk: {bus: virtio}
+            - name: key
+              serial: meatnet-key
+              disk: {bus: virtio}
+            - name: cloudinit
+              disk: {bus: virtio}
+          interfaces:
+            - name: default
+              masquerade: {}
+          hostDevices:
+            - name: bluetooth
+              deviceName: {{ .Values.bluetooth.resourceName }}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: root
+          dataVolume:
+            name: {{ $name }}-root
+        - name: settings
+          dataVolume:
+            name: {{ $name }}-settings
+        - name: config
+          configMap:
+            name: {{ $name }}
+        - name: key
+          secret:
+            secretName: {{ include "meatnet-app.secretName" . }}
+        - name: cloudinit
+          cloudInitNoCloud:
+            userData: |
+              {{- .Files.Get "files/cloud-init.yaml" | nindent 14 }}
+              {{- with .Values.vm.sshAuthorizedKeys }}
+              ssh_authorized_keys:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}

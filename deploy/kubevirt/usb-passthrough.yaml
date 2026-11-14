@@ -1,0 +1,25 @@
+# KubeVirt configuration for the app unit's Bluetooth adapter: lets VMs
+# request the USB device 13d3:3572 (Realtek RTL8852B combo card) by the
+# resource name the chart uses (bluetooth.resourceName).
+#
+# Merge this into your KubeVirt CR (kubectl edit kubevirt -n kubevirt). Keep
+# any feature gates you already have: a merge patch replaces the list.
+#
+# The adapter must not be claimed by anything else on that node: remove it
+# from the generic device plugin used for the Bumble pod (devic.es/...).
+apiVersion: kubevirt.io/v1
+kind: KubeVirt
+metadata:
+  name: kubevirt
+  namespace: kubevirt
+spec:
+  configuration:
+    developerConfiguration:
+      featureGates:
+        - HostDevices
+    permittedHostDevices:
+      usb:
+        - resourceName: kubevirt.io/usb-bluetooth
+          selectors:
+            - vendor: "13d3"
+              product: "3572"
