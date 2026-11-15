@@ -1,4 +1,4 @@
-# Host build: the portable core and its tests (later also the Linux units).
+# Host build: the portable core, its tests and the Linux unit.
 # The ESP32 firmware is a separate ESP-IDF project in firmware/.
 #   cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 cmake_minimum_required(VERSION 3.16)

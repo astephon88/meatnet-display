@@ -57,22 +57,6 @@ static std::string device_name(int ptype)
     return n && *n ? n : "Device";
 }
 
-std::string link_stats(uint32_t connects, const std::map<std::string, uint32_t> &drops,
-                       const std::string &params, const std::string &asked)
-{
-    cJSON *st = cJSON_CreateObject();
-    cJSON_AddNumberToObject(st, "connects", connects);
-    cJSON *d = cJSON_AddObjectToObject(st, "drops");
-    for (auto &kv : drops) cJSON_AddNumberToObject(d, kv.first.c_str(), kv.second);
-    cJSON_AddStringToObject(st, "params", params.c_str());
-    cJSON_AddStringToObject(st, "asked", asked.c_str());
-    char *text = cJSON_PrintUnformatted(st);
-    cJSON_Delete(st);
-    std::string out = text ? text : "";
-    cJSON_free(text);
-    return out;
-}
-
 cJSON *node_status(Node &node, int64_t now)
 {
     cJSON *o = cJSON_CreateObject();
@@ -188,6 +172,19 @@ cJSON *node_status(Node &node, int64_t now)
         for (auto &kv : dir.second) cJSON_AddNumberToObject(d, kv.first.c_str(), kv.second);
     }
     return o;
+}
+
+cJSON *split_status(bool connected, const std::string &peer, const std::string &ip, int rtt_ms, int max_conn)
+{
+    cJSON *sp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(sp, "connected", connected);
+    if (connected) {
+        cJSON_AddStringToObject(sp, "peer", peer.c_str());
+        cJSON_AddStringToObject(sp, "ip", ip.c_str());
+        cJSON_AddNumberToObject(sp, "rtt_ms", rtt_ms);
+        if (max_conn >= 0) cJSON_AddNumberToObject(sp, "max_conn", max_conn);
+    }
+    return sp;
 }
 
 cJSON *field_status(const std::map<Bytes, Observation> &direct, const std::map<Bytes, Observation> &nodes,

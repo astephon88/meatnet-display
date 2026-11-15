@@ -27,7 +27,7 @@ static const char kDeg[] = "\xB0";      // the fonts' degree sign (Latin-1)
 
 static double to_unit(double c, const std::string &unit) { return unit == "f" ? c * 9 / 5 + 32 : c; }
 
-// Python's round(): halves go to the even neighbour.
+// Halves go to the even neighbour.
 static long py_round(double v)
 {
     double r = std::nearbyint(v);

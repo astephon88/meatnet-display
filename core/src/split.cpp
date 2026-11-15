@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -31,6 +30,7 @@ static int cloexec(int fd)
     return fd;
 }
 
+using core::logf;
 using core::ticks_ms;
 
 // -- codec ---------------------------------------------------------------------------------
@@ -94,15 +94,6 @@ cJSON *decode(const std::string &line)
     return msg;
 }
 
-const std::vector<std::string> &link_subs(const std::string &kind)
-{
-    static const std::map<std::string, std::vector<std::string>> subs = {
-        {"probe", {"status", "uart"}}, {"node", {"uart"}}, {"meater", {"temp", "battery"}}};
-    static const std::vector<std::string> none;
-    auto it = subs.find(kind);
-    return it != subs.end() ? it->second : none;
-}
-
 static const char *str_of(const cJSON *msg, const char *name)
 {
     const cJSON *v = cJSON_GetObjectItem(msg, name);
@@ -131,7 +122,7 @@ static cJSON *msg_of(const char *t)
 }
 
 static cJSON *hello_msg(const char *role, const std::string &serial, const std::string &key,
-                        int max_conn, const Bytes &mac, const std::string &impl)
+                        int max_conn, const Bytes &mac)
 {
     cJSON *m = msg_of("hello");
     cJSON_AddNumberToObject(m, "v", VERSION);
@@ -140,7 +131,6 @@ static cJSON *hello_msg(const char *role, const std::string &serial, const std::
     cJSON_AddStringToObject(m, "key", key.c_str());
     cJSON_AddNumberToObject(m, "max_conn", max_conn);
     cJSON_AddStringToObject(m, "mac", proto::hex(mac).c_str());
-    if (!impl.empty()) cJSON_AddStringToObject(m, "impl", impl.c_str());
     return m;
 }
 
@@ -185,6 +175,30 @@ static std::vector<std::string> take_lines(std::string &buf)
     return out;
 }
 
+static std::string ping_line(int64_t now)
+{
+    cJSON *p = msg_of("ping");
+    cJSON_AddNumberToObject(p, "ts", static_cast<double>(now));
+    return encode(p);
+}
+
+// The keep-alive both ends run: answers a ping (into `out`), measures a
+// pong. False for any other message.
+static bool keepalive(const cJSON *msg, std::string &out, std::atomic<int> &rtt_ms)
+{
+    std::string t = str_of(msg, "t");
+    if (t == "ping") {
+        cJSON *p = msg_of("pong");
+        cJSON_AddNumberToObject(p, "ts", num_of(msg, "ts", 0));
+        out += encode(p);
+    } else if (t == "pong") {
+        rtt_ms = static_cast<int>(ticks_ms() - static_cast<int64_t>(num_of(msg, "ts", 0)));
+    } else {
+        return false;
+    }
+    return true;
+}
+
 static void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
 // -- field side ------------------------------------------------------------------------------
@@ -208,7 +222,7 @@ void FieldRadio::prune(int64_t now) { src_.prune(now, FIELD_STALE_MS); }
 
 std::string FieldRadio::scan_message(int64_t now)
 {
-    FieldSource::Tables tb = src_.tables();
+    core::RadioSource::Tables tb = src_.tables();
     struct Ref {
         char name;
         std::map<Bytes, core::Observation> *table;
@@ -270,7 +284,7 @@ std::vector<std::string> FieldRadio::link_messages()
 {
     std::vector<std::string> out;
     for (auto &r : src_.collect_links()) {
-        std::string sig = r.state + "|" + r.desc + "|" + std::to_string(r.mtu) + "|";
+        std::string sig = r.state + "|" + std::to_string(r.mtu) + "|";
         for (auto &kv : r.info) sig += kv.first + "=" + kv.second + ";";
         if (r.has_stats) {
             sig += "|" + std::to_string(r.connects) + "|" + r.params + "|" + r.asked + "|";
@@ -283,7 +297,6 @@ std::vector<std::string> FieldRadio::link_messages()
             cJSON_AddStringToObject(m, "k", khex.c_str());
             cJSON_AddStringToObject(m, "kind", r.kind.c_str());
             cJSON_AddStringToObject(m, "state", r.state.c_str());
-            cJSON_AddStringToObject(m, "desc", r.desc.c_str());
             cJSON_AddNumberToObject(m, "mtu", r.mtu);
             cJSON_AddNumberToObject(m, "count", r.count);
             cJSON *info = cJSON_AddObjectToObject(m, "info");
@@ -313,7 +326,6 @@ std::vector<std::string> FieldRadio::link_messages()
         cJSON_AddStringToObject(m, "k", proto::hex(key).c_str());
         cJSON_AddStringToObject(m, "kind", "");
         cJSON_AddStringToObject(m, "state", "closed");
-        cJSON_AddStringToObject(m, "desc", "");
         cJSON_AddNumberToObject(m, "mtu", 23);
         cJSON_AddNumberToObject(m, "count", 0);
         out.push_back(encode(m));
@@ -352,17 +364,6 @@ void FieldRadio::apply(cJSON *msg)
     }
 }
 
-void SplitClient::logf(const char *fmt, ...)
-{
-    if (!log_) return;
-    char buf[200];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    log_(buf);
-}
-
 std::string SplitClient::peer() const
 {
     std::lock_guard<std::mutex> g(mu_);
@@ -384,7 +385,7 @@ void SplitClient::run()
             session(host);
             fr_.drop_links();       // without the app unit nobody wants the links
             if (connected_) {
-                logf("[split] app unit offline");
+                logf(log_, "[split] app unit offline");
                 backoff_s = 2;
             }
             connected_ = false;
@@ -446,7 +447,7 @@ void SplitClient::session(const std::string &host)
     hints.ai_socktype = SOCK_STREAM;
     struct addrinfo *res = nullptr;
     if (getaddrinfo(host.c_str(), port, &hints, &res) != 0 || !res) {
-        logf("[split] can't resolve app unit '%s'", host.c_str());
+        logf(log_, "[split] can't resolve app unit '%s'", host.c_str());
         return;
     }
     int fd = cloexec(socket(res->ai_family, res->ai_socktype, 0));
@@ -459,12 +460,11 @@ void SplitClient::session(const std::string &host)
     int rc = connect(fd, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
     if (rc != 0) {
-        logf("[split] connection to app unit %s:%s failed (errno %d)", host.c_str(), port, errno);
+        logf(log_, "[split] connection to app unit %s:%s failed (errno %d)", host.c_str(), port, errno);
         close(fd);
         return;
     }
-    if (!send_all(fd, encode(hello_msg("field", cfg_.serial, cfg_.key, cfg_.max_conn, cfg_.mac,
-                                       cfg_.impl)))) {
+    if (!send_all(fd, encode(hello_msg("field", cfg_.serial, cfg_.key, cfg_.max_conn, cfg_.mac)))) {
         close(fd);
         return;
     }
@@ -483,7 +483,7 @@ void SplitClient::session(const std::string &host)
         }
     }
     if (!reply || std::string(str_of(reply, "t")) != "hello") {
-        logf("[split] app unit at %s refused the connection (key?)", host.c_str());
+        logf(log_, "[split] app unit at %s refused the connection (key?)", host.c_str());
         cJSON_Delete(reply);
         close(fd);
         return;
@@ -499,14 +499,14 @@ void SplitClient::session(const std::string &host)
     fr_.reset();
     fr_.set_ignore(app_mac, peer());
     connected_ = true;
-    logf("[split] connected to app unit %s at %s", peer().c_str(), host.c_str());
+    logf(log_, "[split] connected to app unit %s at %s", peer().c_str(), host.c_str());
 
     int64_t rx_at = ticks_ms(), ping_at = rx_at, scan_at = 0;
-    std::vector<std::string> out;
+    std::string out;
     while (!stop_) {
         int64_t now = ticks_ms();
         if (now - rx_at > DEAD_MS) {
-            logf("[split] app unit timed out");
+            logf(log_, "[split] app unit timed out");
             break;
         }
         if (readable(fd, 100)) {
@@ -518,39 +518,23 @@ void SplitClient::session(const std::string &host)
             for (auto &line : take_lines(buf)) {
                 cJSON *msg = decode(line);
                 if (!msg) continue;
-                std::string t = str_of(msg, "t");
-                if (t == "ping") {
-                    cJSON *p = msg_of("pong");
-                    cJSON_AddNumberToObject(p, "ts", num_of(msg, "ts", 0));
-                    out.push_back(encode(p));
-                } else if (t == "pong") {
-                    rtt_ms_ = static_cast<int>(ticks_ms() - static_cast<int64_t>(num_of(msg, "ts", 0)));
-                } else {
-                    fr_.apply(msg);
-                }
+                if (!keepalive(msg, out, rtt_ms_)) fr_.apply(msg);
                 cJSON_Delete(msg);
             }
         }
-        for (auto &m : fr_.link_messages()) out.push_back(std::move(m));
+        for (auto &m : fr_.link_messages()) out += m;
         now = ticks_ms();
         if (now - scan_at >= SCAN_BATCH_MS) {
             scan_at = now;
             fr_.prune(now);
-            std::string m = fr_.scan_message(now);
-            if (!m.empty()) out.push_back(m);
+            out += fr_.scan_message(now);
         }
         if (now - ping_at >= PING_MS) {
             ping_at = now;
-            cJSON *p = msg_of("ping");
-            cJSON_AddNumberToObject(p, "ts", static_cast<double>(now));
-            out.push_back(encode(p));
+            out += ping_line(now);
         }
-        if (!out.empty()) {
-            std::string all;
-            for (auto &l : out) all += l;
-            out.clear();
-            if (!send_all(fd, all)) break;
-        }
+        if (!out.empty() && !send_all(fd, out)) break;
+        out.clear();
     }
     close(fd);
 }
@@ -595,12 +579,6 @@ void RemoteRadio::queue(cJSON *msg)
     outbox_.push_back(std::move(line));
 }
 
-std::vector<std::string> RemoteRadio::take_outbox()
-{
-    std::lock_guard<std::mutex> g(mu_);
-    return std::move(outbox_);
-}
-
 std::shared_ptr<core::Link> RemoteRadio::open_link(const Bytes &key, const std::string &kind, int addr_type,
                                                    const Bytes &addr)
 {
@@ -610,7 +588,6 @@ std::shared_ptr<core::Link> RemoteRadio::open_link(const Bytes &key, const std::
         if (!connected) static_cast<RemoteLink &>(*slot).state_ = "error: field unit offline";
     }
     auto &link = static_cast<RemoteLink &>(*slot);
-    link.enabled_ = true;
     cJSON *m = msg_of("open");
     cJSON_AddStringToObject(m, "k", proto::hex(key).c_str());
     cJSON_AddStringToObject(m, "kind", kind.c_str());
@@ -724,7 +701,7 @@ void RemoteRadio::on_connect(const std::string &hello_line, const std::string &i
         link.opened_ = false;
         link.state_ = "idle";
         auto args = link_args_.find(kv.first);
-        if (link.enabled_ && args != link_args_.end()) {
+        if (args != link_args_.end()) {
             queue(decode(args->second));
             link.opened_ = true;
         }
@@ -815,8 +792,6 @@ void RemoteRadio::apply(cJSON *msg, int64_t now)
         const char *state = str_of(msg, "state");
         std::string st = state ? state : "";
         link.state_ = st == "closed" ? "idle" : st;
-        const char *desc = str_of(msg, "desc");
-        link.desc_ = desc ? desc : "";
         link.mtu_ = static_cast<int>(num_of(msg, "mtu", 23));
         link.count_ = static_cast<uint32_t>(num_of(msg, "count", link.count_));
         const cJSON *info = cJSON_GetObjectItem(msg, "info");
@@ -849,7 +824,6 @@ void RemoteRadio::net_connected(const std::string &hello_line, const std::string
     std::lock_guard<std::mutex> g(mu_);
     outbox_.clear();            // nothing from an earlier session
     inbox_.push_back({Event::CONNECT, hello_line, ip});
-    net_connected_ = true;
 }
 
 void RemoteRadio::net_received(const std::string &line)
@@ -862,10 +836,9 @@ void RemoteRadio::net_disconnected()
 {
     std::lock_guard<std::mutex> g(mu_);
     inbox_.push_back({Event::DISCONNECT, std::string(), std::string()});
-    net_connected_ = false;
 }
 
-std::vector<std::string> RemoteRadio::net_take_outbox()
+std::vector<std::string> RemoteRadio::take_outbox()
 {
     std::lock_guard<std::mutex> g(mu_);
     return std::move(outbox_);
@@ -879,15 +852,94 @@ SplitServer::SplitServer(RemoteRadio &remote, ServerConfig cfg, LogFn log)
     remote_.own_serial = protocol::encode_serial(cfg_.serial);
 }
 
-void SplitServer::logf(const char *fmt, ...)
+void SplitServer::end_session()
 {
-    if (!log_) return;
-    char buf[200];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    log_(buf);
+    if (sfd_ < 0) return;
+    close(sfd_);
+    sfd_ = -1;
+    sbuf_.clear();
+    remote_.net_disconnected();
+}
+
+// Connections that haven't sent their hello yet: a field unit with our key
+// becomes the session (replacing an older one), anything else is closed.
+void SplitServer::poll_candidates(int64_t now)
+{
+    for (size_t i = 0; i < candidates_.size();) {
+        Candidate &c = candidates_[i];
+        bool done = now > c.deadline, ok = false;
+        std::string hello_line;
+        if (c.readable) {
+            char tmp[512];
+            int n = recv(c.fd, tmp, sizeof(tmp), 0);
+            if (n > 0) c.buf.append(tmp, n);
+            auto lines = take_lines(c.buf);
+            done = done || n <= 0 || !lines.empty();
+            if (!lines.empty()) {
+                cJSON *hello = decode(lines[0]);
+                const char *role = hello ? str_of(hello, "role") : nullptr;
+                if (hello && std::string(str_of(hello, "t")) == "hello" && role && std::string(role) == "field") {
+                    const char *key = str_of(hello, "key");
+                    if ((key ? key : "") == cfg_.key) {
+                        ok = true;
+                        hello_line = lines[0];
+                    } else {
+                        const char *s = str_of(hello, "serial");
+                        logf(log_, "[split] field unit %s rejected: wrong key", s ? s : "?");
+                    }
+                }
+                cJSON_Delete(hello);
+            }
+        }
+        if (!done) {
+            ++i;
+            continue;
+        }
+        if (ok) end_session();
+        if (ok && send_all(c.fd, encode(hello_msg("app", cfg_.serial, cfg_.key, 0, cfg_.mac)))) {
+            sfd_ = c.fd;
+            sbuf_ = c.buf;
+            rx_at_ = ping_at_ = now;
+            remote_.net_connected(hello_line, c.ip);
+        } else {
+            close(c.fd);
+        }
+        candidates_.erase(candidates_.begin() + i);
+    }
+}
+
+// The field unit's session: its messages in, ours out, and the keep-alive.
+void SplitServer::poll_session(bool readable, int64_t now)
+{
+    bool alive = true;
+    std::string out;
+    if (readable) {
+        char tmp[4096];
+        int n = recv(sfd_, tmp, sizeof(tmp), 0);
+        if (n <= 0) {
+            alive = false;
+        } else {
+            rx_at_ = now;
+            sbuf_.append(tmp, n);
+            for (auto &line : take_lines(sbuf_)) {
+                cJSON *msg = decode(line);
+                if (!msg) continue;
+                if (!keepalive(msg, out, remote_.rtt_ms)) remote_.net_received(line);
+                cJSON_Delete(msg);
+            }
+        }
+    }
+    if (alive && now - rx_at_ > DEAD_MS) {
+        logf(log_, "[split] field unit timed out");
+        alive = false;
+    }
+    if (alive && now - ping_at_ >= PING_MS) {
+        ping_at_ = now;
+        out += ping_line(now);
+    }
+    if (alive)
+        for (auto &l : remote_.take_outbox()) out += l;
+    if (!alive || (!out.empty() && !send_all(sfd_, out))) end_session();
 }
 
 void SplitServer::run()
@@ -900,7 +952,7 @@ void SplitServer::run()
     a.sin_port = htons(cfg_.port);
     inet_pton(AF_INET, cfg_.bind.c_str(), &a.sin_addr);
     if (lfd < 0 || bind(lfd, reinterpret_cast<struct sockaddr *>(&a), sizeof(a)) != 0 || listen(lfd, 2) != 0) {
-        logf("[split] can't listen on port %u (errno %d)", cfg_.port, errno);
+        logf(log_, "[split] can't listen on port %u (errno %d)", cfg_.port, errno);
         if (lfd >= 0) close(lfd);
         return;
     }
@@ -909,153 +961,43 @@ void SplitServer::run()
         bfd = cloexec(socket(AF_INET, SOCK_DGRAM, 0));
         if (bfd >= 0) setsockopt(bfd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
     }
-
-    // Connections that haven't sent their hello yet.
-    struct Candidate {
-        int fd;
-        std::string ip, buf;
-        int64_t deadline;
-    };
-    std::vector<Candidate> candidates;
-    int sfd = -1;               // the field unit's session
-    std::string sbuf;
-    int64_t rx_at = 0, ping_at = 0, beacon_at = 0;
-
-    auto end_session = [&]() {
-        if (sfd < 0) return;
-        close(sfd);
-        sfd = -1;
-        sbuf.clear();
-        remote_.net_disconnected();
-    };
+    int64_t beacon_at = 0;
 
     while (!stop_) {
         fd_set rs;
         FD_ZERO(&rs);
         FD_SET(lfd, &rs);
         int maxfd = lfd;
-        for (auto &c : candidates) {
+        for (auto &c : candidates_) {
             FD_SET(c.fd, &rs);
             maxfd = std::max(maxfd, c.fd);
         }
-        if (sfd >= 0) {
-            FD_SET(sfd, &rs);
-            maxfd = std::max(maxfd, sfd);
+        if (sfd_ >= 0) {
+            FD_SET(sfd_, &rs);
+            maxfd = std::max(maxfd, sfd_);
         }
         struct timeval tv = {0, 50000};
-        int sel = select(maxfd + 1, &rs, nullptr, nullptr, &tv);
+        bool any = select(maxfd + 1, &rs, nullptr, nullptr, &tv) > 0;
         int64_t now = ticks_ms();
 
-        if (sel > 0 && FD_ISSET(lfd, &rs)) {
+        for (auto &c : candidates_) c.readable = any && FD_ISSET(c.fd, &rs);
+        bool session_readable = any && sfd_ >= 0 && FD_ISSET(sfd_, &rs);
+        if (any && FD_ISSET(lfd, &rs)) {
             struct sockaddr_in from = {};
             socklen_t fl = sizeof(from);
             int fd = cloexec(accept(lfd, reinterpret_cast<struct sockaddr *>(&from), &fl));
             if (fd >= 0) {
                 char ip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));
-                candidates.push_back({fd, ip, std::string(), now + 5000});
+                candidates_.push_back({fd, ip, std::string(), now + 5000, false});
             }
         }
-        for (size_t i = 0; i < candidates.size();) {
-            Candidate &c = candidates[i];
-            bool done = false, ok = false;
-            std::string hello_line;
-            if (sel > 0 && FD_ISSET(c.fd, &rs)) {
-                char tmp[512];
-                int n = recv(c.fd, tmp, sizeof(tmp), 0);
-                if (n <= 0) {
-                    done = true;
-                } else {
-                    c.buf.append(tmp, n);
-                    auto lines = take_lines(c.buf);
-                    if (!lines.empty()) {
-                        done = true;
-                        cJSON *hello = decode(lines[0]);
-                        const char *role = hello ? str_of(hello, "role") : nullptr;
-                        if (hello && std::string(str_of(hello, "t")) == "hello" && role &&
-                            std::string(role) == "field") {
-                            const char *key = str_of(hello, "key");
-                            if ((key ? key : "") == cfg_.key) {
-                                ok = true;
-                                hello_line = lines[0];
-                            } else {
-                                const char *s = str_of(hello, "serial");
-                                logf("[split] field unit %s rejected: wrong key", s ? s : "?");
-                            }
-                        }
-                        cJSON_Delete(hello);
-                    }
-                }
-            }
-            if (!done && now > c.deadline) done = true;
-            if (!done) {
-                ++i;
-                continue;
-            }
-            if (ok) {
-                end_session();          // a newer connection replaces the old one
-                if (send_all(c.fd, encode(hello_msg("app", cfg_.serial, cfg_.key, 0, cfg_.mac, "")))) {
-                    sfd = c.fd;
-                    sbuf = c.buf;
-                    rx_at = ping_at = now;
-                    remote_.net_connected(hello_line, c.ip);
-                } else {
-                    close(c.fd);
-                }
-            } else {
-                close(c.fd);
-            }
-            candidates.erase(candidates.begin() + i);
-        }
+        int session = sfd_;
+        poll_candidates(now);
+        // A session that began just now has nothing waiting to be read.
+        if (sfd_ >= 0) poll_session(session_readable && sfd_ == session, now);
 
-        if (sfd >= 0) {
-            bool alive = true;
-            if (sel > 0 && FD_ISSET(sfd, &rs)) {
-                char tmp[4096];
-                int n = recv(sfd, tmp, sizeof(tmp), 0);
-                if (n <= 0) {
-                    alive = false;
-                } else {
-                    rx_at = now;
-                    sbuf.append(tmp, n);
-                    std::string replies;
-                    for (auto &line : take_lines(sbuf)) {
-                        cJSON *msg = decode(line);
-                        if (!msg) continue;
-                        std::string t = str_of(msg, "t");
-                        if (t == "ping") {
-                            cJSON *p = msg_of("pong");
-                            cJSON_AddNumberToObject(p, "ts", num_of(msg, "ts", 0));
-                            replies += encode(p);
-                        } else if (t == "pong") {
-                            remote_.rtt_ms = static_cast<int>(now - static_cast<int64_t>(num_of(msg, "ts", 0)));
-                        } else {
-                            remote_.net_received(line);
-                        }
-                        cJSON_Delete(msg);
-                    }
-                    if (!replies.empty() && !send_all(sfd, replies)) alive = false;
-                }
-            }
-            if (alive && now - rx_at > DEAD_MS) {
-                logf("[split] field unit timed out");
-                alive = false;
-            }
-            if (alive && now - ping_at >= PING_MS) {
-                ping_at = now;
-                cJSON *p = msg_of("ping");
-                cJSON_AddNumberToObject(p, "ts", static_cast<double>(now));
-                if (!send_all(sfd, encode(p))) alive = false;
-            }
-            if (alive) {
-                std::string all;
-                for (auto &l : remote_.net_take_outbox()) all += l;
-                if (!all.empty() && !send_all(sfd, all)) alive = false;
-            }
-            if (!alive) end_session();
-        }
-
-        if (bfd >= 0 && sfd < 0 && now - beacon_at >= 2000) {
+        if (bfd >= 0 && sfd_ < 0 && now - beacon_at >= 2000) {
             beacon_at = now;
             cJSON *b = msg_of("beacon");
             cJSON_AddStringToObject(b, "serial", cfg_.serial.c_str());
@@ -1068,7 +1010,8 @@ void SplitServer::run()
             sendto(bfd, line.data(), line.size(), 0, reinterpret_cast<struct sockaddr *>(&to), sizeof(to));
         }
     }
-    for (auto &c : candidates) close(c.fd);
+    for (auto &c : candidates_) close(c.fd);
+    candidates_.clear();
     end_session();
     if (bfd >= 0) close(bfd);
     close(lfd);

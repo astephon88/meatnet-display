@@ -1,3 +1,3 @@
-idf_component_register(SRCS "app_main.cpp"
+idf_component_register(SRCS "app_main.cpp" "wifi.cpp" "battery.cpp"
                        INCLUDE_DIRS "."
-                       REQUIRES esp_adc nvs_flash esp_wifi esp_netif esp_event esp_coex esp_timer json bt radio core settings web captive screen peripheral esp_transport)
+                       REQUIRES esp_adc nvs_flash esp_wifi esp_netif esp_event esp_coex esp_timer json bt radio core settings web captive screen peripheral)

@@ -1,8 +1,8 @@
-// The Linux unit's scanning and outbound links on BlueZ: a split::FieldSource, so the field
-// role streams it to the app unit and the standalone role's transport reads
-// it directly.
+// The Linux unit's scanning and outbound links on BlueZ: a core::RadioSource,
+// so the field role streams it to the app unit and the standalone role's
+// transport reads it directly.
 //
-// D-Bus work runs on the GLib main loop thread; the FieldSource methods may
+// D-Bus work runs on the GLib main loop thread; the RadioSource methods may
 // be called from any thread (tables and link reports are locked, commands
 // are handed to the loop).
 #pragma once
@@ -18,24 +18,25 @@
 #include <vector>
 
 #include "gdbus_util.h"
-#include "split.h"
-#include "status.h"
+#include "radio_source.h"
+#include "util.h"
 
 namespace linux_unit {
 
 using core::Bytes;
-using LogFn = std::function<void(const std::string &)>;
+using core::LogFn;
 
-class Central : public split::FieldSource {
+class Central : public core::RadioSource {
 public:
     Central(GDBusConnection *bus, GMainContext *loop, std::string adapter_path, LogFn log);
     void start();                       // on the loop thread
     void shutdown();                    // disconnects our links (the loop has stopped)
 
-    // split::FieldSource (any thread)
+    // core::RadioSource (any thread)
     Tables tables() override;
     void prune(int64_t now, int64_t max_age_ms) override;
-    std::vector<split::LinkReport> collect_links() override;
+    std::vector<core::LinkReport> collect_links() override;
+    std::vector<core::LinkSummary> link_summaries() override;
     std::vector<Bytes> take_removed_links() override;
     void open_link(const Bytes &key, const std::string &kind, int addr_type, const Bytes &addr) override;
     void close_link(const Bytes &key) override;
@@ -46,7 +47,6 @@ public:
     void set_ignore(const Bytes &mac, const Bytes &serial10) override;
 
     Bytes mac;                          // adapter address, display order
-    std::vector<core::LinkSummary> link_summaries();   // for the status page (doesn't drain)
 
 private:
     struct Dev {

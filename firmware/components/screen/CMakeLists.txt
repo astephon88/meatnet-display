@@ -1,4 +1,4 @@
-# The fonts are the MicroPython unit's (fonts/, made by tools/make_font.py).
+# The fonts are in fonts/ (made by tools/make_font.py).
 idf_component_register(SRCS "screen.cpp"
                        INCLUDE_DIRS "include"
                        EMBED_FILES "${CMAKE_CURRENT_LIST_DIR}/../../../fonts/big.bin"

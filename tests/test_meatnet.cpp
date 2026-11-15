@@ -14,7 +14,7 @@ using core::Settings;
 static const std::string SERIAL = "ME00000001";
 static const Bytes PROBE("\x01\x02\x03\x04", 4);
 
-// A Node on a fake transport, with a link table, like the Python make().
+// A Node on a fake transport, with a link table.
 struct Rig {
     FakeTransport t;
     Settings cfg;

@@ -28,6 +28,7 @@
 #include "linktable.h"
 #include "meater.h"
 #include "protocol.h"
+#include "radio_source.h"
 #include "unit_settings.h"
 #include "transport.h"
 #include "util.h"
@@ -113,7 +114,7 @@ struct ViaNode {
 };
 
 struct MyReq {
-    std::string purpose;        // "assoc" or "table"
+    enum Purpose { ASSOC, TABLE } purpose = ASSOC;
     Port port;
     uint8_t msg_type = 0;
     int page = 0;
@@ -151,7 +152,6 @@ struct MeaterReading {
 
 class Node {
 public:
-    using LogFn = std::function<void(const std::string &)>;
     Node(Transport &t, Settings &cfg, std::string serial, LogFn log = nullptr,
          LinkTable *links = nullptr);
 
@@ -208,18 +208,21 @@ public:
     std::map<std::string, std::map<std::string, int>> via;
 
 private:
-    void logf(const char *fmt, ...);
     std::vector<std::pair<Bytes, Link *>> node_links();
     Link *probe_link(const Bytes &serial4);
-    void count_via(const std::string &direction, const Bytes &frame, const Bytes &key = Bytes());
+    const Observation *heard(const Bytes &key, const std::string &kind) const;
+    int link_rssi(const Bytes &key, const std::string &kind) const;
+    void count_via(bool to_node, const Bytes &frame, const Bytes &key = Bytes());
     void send(const Port &port, const Bytes &frame);
     // Send to every port except the one the message came from. links: node
     // links only when push_upstream() (nullopt); true: always.
     void flood(const Bytes &frame, const std::optional<Port> &origin = std::nullopt,
                bool inbound = true, std::optional<bool> links = std::nullopt);
+    void flood_own(const Bytes &frame);
 
     void service_link(const Bytes &key, Link &link, int64_t now);
 
+    MeaterProbe meater_config(const Bytes &addr) const;
     meater::Fields meater_fields(const Bytes &addr);
     Bytes meater_direct(const Bytes &addr);
     void meater_update(const Bytes &addr, int64_t now);

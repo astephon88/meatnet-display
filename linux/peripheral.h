@@ -22,14 +22,15 @@
 #include <vector>
 
 #include "gdbus_util.h"
-#include "transport.h"
+#include "radio_source.h"
+#include "util.h"
 
 namespace linux_unit {
 
 using core::Bytes;
-using LogFn = std::function<void(const std::string &)>;
+using core::LogFn;
 
-class Peripheral {
+class Peripheral : public core::PeripheralPort {
 public:
     Peripheral(GDBusConnection *bus, std::string adapter_path, std::string serial, std::string model,
                std::string firmware, LogFn log);
@@ -38,14 +39,18 @@ public:
 
     Bytes mac;                          // adapter address, display order
     std::set<int> inbound;
-    std::vector<std::pair<int, Bytes>> poll_rx();
-    void send(const Bytes &frame, const std::vector<int> &conns);
-    void set_advertising(const std::vector<core::Transport::Advert> &adverts);
-    void set_firmware(const std::string &fw) { firmware_ = fw; }
-    void set_standby(bool on);
     void service();                     // queued notifications, advertising changes
-    size_t txq_size() const { return txq_.size(); }
-    uint32_t tx_dropped() const { return tx_dropped_; }
+
+    // core::PeripheralPort
+    Bytes mac_address() override { return mac; }
+    std::set<int> connections() override { return inbound; }
+    std::vector<std::pair<int, Bytes>> poll_rx() override;
+    void send(const Bytes &frame, const std::vector<int> &conns) override;
+    void set_advertising(const std::vector<core::Transport::Advert> &adverts, bool fast) override;
+    void set_firmware(const std::string &fw) override { firmware_ = fw; }
+    void set_standby(bool on) override;
+    size_t txq_size() override { return txq_.size(); }
+    uint32_t tx_dropped() override { return tx_dropped_; }
 
 private:
     struct Chr {

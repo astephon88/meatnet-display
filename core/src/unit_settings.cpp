@@ -1,12 +1,86 @@
 #include "unit_settings.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
-#include <set>
+#include <variant>
 
 #include "cJSON.h"
 
 namespace core {
+
+namespace {
+
+// The scalar settings: one row drives loading, saving and the web page's
+// validation. The list-valued ones (readings, linked_probes, upstream_node,
+// meater_probes, pins) are handled by name below.
+enum : unsigned {
+    REBOOT = 1,         // takes effect only after a restart
+    SECRET = 2,         // shown to the page as "<name>_set"
+    PASSWORD = 4,       // "" (open network) or 8-63 characters
+    KEEP_BLANK = 8,     // an empty value from the page keeps the saved one
+    EXACT = 16,         // empty or exactly `hi` characters
+    FIXED = 32,         // not changed from the page
+};
+
+struct Field {
+    const char *name;
+    std::variant<std::string Settings::*, int Settings::*, double Settings::*, bool Settings::*> member;
+    double lo, hi;              // numbers: the range; text: hi = most characters
+    const char *choices;        // text: one of these (comma-separated)
+    unsigned flags;
+};
+
+const Field kFields[] = {
+    {"role", &Settings::role, 0, 0, "standalone,app,field", REBOOT},
+    {"split_peer", &Settings::split_peer, 0, 64, nullptr, REBOOT},
+    {"split_key", &Settings::split_key, 0, 64, nullptr, REBOOT | SECRET | KEEP_BLANK},
+    {"split_port", &Settings::split_port, 1, 65535, nullptr, REBOOT},
+    {"wifi_ssid", &Settings::wifi_ssid, 0, 32, nullptr, REBOOT},
+    {"wifi_password", &Settings::wifi_password, 0, 0, nullptr, REBOOT | SECRET | PASSWORD},
+    {"ap_password", &Settings::ap_password, 0, 0, nullptr, REBOOT | SECRET | PASSWORD},
+    {"hostname", &Settings::hostname, 0, 32, nullptr, REBOOT},
+    {"serial", &Settings::serial, 0, 10, nullptr, REBOOT | EXACT},
+    {"dis_model", &Settings::dis_model, 0, 32, nullptr, REBOOT},
+    {"dis_firmware", &Settings::dis_firmware, 0, 16, nullptr, 0},
+    {"unit", &Settings::unit, 0, 0, "c,f", 0},
+    {"layout", &Settings::layout, 0, 0, "rotate,quad", 0},
+    {"rotate_s", &Settings::rotate_s, 2, 120, nullptr, 0},
+    {"brightness", &Settings::brightness, 5, 100, nullptr, 0},
+    {"screen", &Settings::screen, 0, 0, nullptr, REBOOT},
+    {"status_page", &Settings::status_page, 0, 0, nullptr, 0},
+    {"repeat_adverts", &Settings::repeat_adverts, 0, 0, "all,linked,off", 0},
+    {"meatnet_peer", &Settings::meatnet_peer, 0, 0, nullptr, 0},
+    {"upstream_push", &Settings::upstream_push, 0, 0, nullptr, 0},
+    {"max_conn", &Settings::max_conn, 1, 9, nullptr, REBOOT},
+    {"linked_scan_duty", &Settings::linked_scan_duty, 5, 50, nullptr, REBOOT},
+    {"inbound_reserve", &Settings::inbound_reserve, 0, 4, nullptr, 0},
+    {"meater_bridge", &Settings::meater_bridge, 0, 0, nullptr, 0},
+    {"meater_direct_adverts", &Settings::meater_direct_adverts, 0, 0, nullptr, 0},
+    {"standby", &Settings::standby, 0, 0, nullptr, FIXED},
+    {"auto_standby_min", &Settings::auto_standby_min, 0, 1440, nullptr, 0},
+    {"battery_pin", &Settings::battery_pin, -1, 48, nullptr, REBOOT},
+    {"battery_divider", &Settings::battery_divider, 0.1, 20, nullptr, 0},
+    {"supervision_probe_ms", &Settings::supervision_probe_ms, 1000, 32000, nullptr, REBOOT},
+    {"supervision_node_ms", &Settings::supervision_node_ms, 1000, 32000, nullptr, REBOOT},
+    {"peer_latency_max", &Settings::peer_latency_max, 0, 10, nullptr, REBOOT},
+    {"coex", &Settings::coex, 0, 0, "bt,balance,wifi", REBOOT},
+};
+
+struct PinField {
+    const char *name;
+    int Pins::*member;
+    int lo, hi;
+};
+
+const PinField kPins[] = {
+    {"sck", &Pins::sck, -1, 48},   {"mosi", &Pins::mosi, -1, 48}, {"dc", &Pins::dc, -1, 48},
+    {"cs", &Pins::cs, -1, 48},     {"rst", &Pins::rst, -1, 48},   {"bl", &Pins::bl, -1, 48},
+    {"spi", &Pins::spi, -1, 48},   {"baud", &Pins::baud, 1000000, 80000000},
+    {"rotation", &Pins::rotation, 0, 3},
+};
+
+}  // namespace
 
 static void take(const cJSON *o, const char *k, std::string &out)
 {
@@ -45,23 +119,12 @@ static void take(const cJSON *o, const char *k, std::vector<std::string> &out)
 void merge_settings(Settings &s, const cJSON *o)
 {
     if (!cJSON_IsObject(o)) return;
-    take(o, "role", s.role);
-    take(o, "split_peer", s.split_peer);
-    take(o, "split_key", s.split_key);
-    take(o, "split_port", s.split_port);
-    take(o, "wifi_ssid", s.wifi_ssid);
-    take(o, "wifi_password", s.wifi_password);
-    take(o, "ap_password", s.ap_password);
-    take(o, "hostname", s.hostname);
-    take(o, "serial", s.serial);
-    take(o, "dis_model", s.dis_model);
-    take(o, "dis_firmware", s.dis_firmware);
-    take(o, "unit", s.unit);
-    take(o, "layout", s.layout);
-    take(o, "rotate_s", s.rotate_s);
-    take(o, "brightness", s.brightness);
-    take(o, "screen", s.screen);
-    take(o, "status_page", s.status_page);
+    for (const Field &f : kFields) {
+        if (auto m = std::get_if<std::string Settings::*>(&f.member)) take(o, f.name, s.**m);
+        else if (auto m = std::get_if<int Settings::*>(&f.member)) take(o, f.name, s.**m);
+        else if (auto m = std::get_if<double Settings::*>(&f.member)) take(o, f.name, s.**m);
+        else if (auto m = std::get_if<bool Settings::*>(&f.member)) take(o, f.name, s.**m);
+    }
     const cJSON *rd = cJSON_GetObjectItemCaseSensitive(o, "readings");
     if (cJSON_IsArray(rd)) {
         s.readings.clear();
@@ -83,13 +146,6 @@ void merge_settings(Settings &s, const cJSON *o)
     } else {
         take(o, "upstream_node", s.upstream_node);
     }
-    take(o, "repeat_adverts", s.repeat_adverts);
-    take(o, "meatnet_peer", s.meatnet_peer);
-    take(o, "upstream_push", s.upstream_push);
-    take(o, "max_conn", s.max_conn);
-    take(o, "linked_scan_duty", s.linked_scan_duty);
-    take(o, "inbound_reserve", s.inbound_reserve);
-    take(o, "meater_bridge", s.meater_bridge);
     const cJSON *mp = cJSON_GetObjectItemCaseSensitive(o, "meater_probes");
     if (cJSON_IsArray(mp)) {
         s.meater_probes.clear();
@@ -103,27 +159,9 @@ void merge_settings(Settings &s, const cJSON *o)
             s.meater_probes.push_back(m);
         }
     }
-    take(o, "meater_direct_adverts", s.meater_direct_adverts);
-    take(o, "standby", s.standby);
-    take(o, "auto_standby_min", s.auto_standby_min);
-    take(o, "battery_pin", s.battery_pin);
-    take(o, "battery_divider", s.battery_divider);
     const cJSON *pins = cJSON_GetObjectItemCaseSensitive(o, "pins");
-    if (cJSON_IsObject(pins)) {
-        take(pins, "sck", s.pins.sck);
-        take(pins, "mosi", s.pins.mosi);
-        take(pins, "dc", s.pins.dc);
-        take(pins, "cs", s.pins.cs);
-        take(pins, "rst", s.pins.rst);
-        take(pins, "bl", s.pins.bl);
-        take(pins, "spi", s.pins.spi);
-        take(pins, "baud", s.pins.baud);
-        take(pins, "rotation", s.pins.rotation);
-    }
-    take(o, "supervision_probe_ms", s.supervision_probe_ms);
-    take(o, "supervision_node_ms", s.supervision_node_ms);
-    take(o, "peer_latency_max", s.peer_latency_max);
-    take(o, "coex", s.coex);
+    if (cJSON_IsObject(pins))
+        for (const PinField &p : kPins) take(pins, p.name, s.pins.*p.member);
 }
 
 void merge_settings(Settings &s, const std::string &json)
@@ -140,32 +178,21 @@ static cJSON *strings(const std::vector<std::string> &v)
     return a;
 }
 
-static void secret(cJSON *o, const char *k, const std::string &v, bool show)
-{
-    if (show) cJSON_AddStringToObject(o, k, v.c_str());
-    else cJSON_AddBoolToObject(o, (std::string(k) + "_set").c_str(), !v.empty());
-}
-
 cJSON *settings_to_json(const Settings &s, bool secrets)
 {
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "role", s.role.c_str());
-    cJSON_AddStringToObject(o, "split_peer", s.split_peer.c_str());
-    secret(o, "split_key", s.split_key, secrets);
-    cJSON_AddNumberToObject(o, "split_port", s.split_port);
-    cJSON_AddStringToObject(o, "wifi_ssid", s.wifi_ssid.c_str());
-    secret(o, "wifi_password", s.wifi_password, secrets);
-    secret(o, "ap_password", s.ap_password, secrets);
-    cJSON_AddStringToObject(o, "hostname", s.hostname.c_str());
-    cJSON_AddStringToObject(o, "serial", s.serial.c_str());
-    cJSON_AddStringToObject(o, "dis_model", s.dis_model.c_str());
-    cJSON_AddStringToObject(o, "dis_firmware", s.dis_firmware.c_str());
-    cJSON_AddStringToObject(o, "unit", s.unit.c_str());
-    cJSON_AddStringToObject(o, "layout", s.layout.c_str());
-    cJSON_AddNumberToObject(o, "rotate_s", s.rotate_s);
-    cJSON_AddNumberToObject(o, "brightness", s.brightness);
-    cJSON_AddBoolToObject(o, "screen", s.screen);
-    cJSON_AddBoolToObject(o, "status_page", s.status_page);
+    for (const Field &f : kFields) {
+        if (auto m = std::get_if<std::string Settings::*>(&f.member)) {
+            if (!(f.flags & SECRET) || secrets) cJSON_AddStringToObject(o, f.name, (s.**m).c_str());
+            else cJSON_AddBoolToObject(o, (std::string(f.name) + "_set").c_str(), !(s.**m).empty());
+        } else if (auto m = std::get_if<int Settings::*>(&f.member)) {
+            cJSON_AddNumberToObject(o, f.name, s.**m);
+        } else if (auto m = std::get_if<double Settings::*>(&f.member)) {
+            cJSON_AddNumberToObject(o, f.name, s.**m);
+        } else if (auto m = std::get_if<bool Settings::*>(&f.member)) {
+            cJSON_AddBoolToObject(o, f.name, s.**m);
+        }
+    }
     cJSON *rd = cJSON_AddArrayToObject(o, "readings");
     for (auto &r : s.readings) {
         cJSON *e = cJSON_CreateObject();
@@ -176,13 +203,6 @@ cJSON *settings_to_json(const Settings &s, bool secrets)
     }
     cJSON_AddItemToObject(o, "linked_probes", strings(s.linked_probes));
     cJSON_AddItemToObject(o, "upstream_node", strings(s.upstream_node));
-    cJSON_AddStringToObject(o, "repeat_adverts", s.repeat_adverts.c_str());
-    cJSON_AddBoolToObject(o, "meatnet_peer", s.meatnet_peer);
-    cJSON_AddBoolToObject(o, "upstream_push", s.upstream_push);
-    cJSON_AddNumberToObject(o, "max_conn", s.max_conn);
-    cJSON_AddNumberToObject(o, "linked_scan_duty", s.linked_scan_duty);
-    cJSON_AddNumberToObject(o, "inbound_reserve", s.inbound_reserve);
-    cJSON_AddBoolToObject(o, "meater_bridge", s.meater_bridge);
     cJSON *mp = cJSON_AddArrayToObject(o, "meater_probes");
     for (auto &m : s.meater_probes) {
         cJSON *e = cJSON_CreateObject();
@@ -191,31 +211,10 @@ cJSON *settings_to_json(const Settings &s, bool secrets)
         cJSON_AddNumberToObject(e, "color", m.color);
         cJSON_AddItemToArray(mp, e);
     }
-    cJSON_AddBoolToObject(o, "meater_direct_adverts", s.meater_direct_adverts);
-    cJSON_AddBoolToObject(o, "standby", s.standby);
-    cJSON_AddNumberToObject(o, "auto_standby_min", s.auto_standby_min);
-    cJSON_AddNumberToObject(o, "battery_pin", s.battery_pin);
-    cJSON_AddNumberToObject(o, "battery_divider", s.battery_divider);
     cJSON *p = cJSON_AddObjectToObject(o, "pins");
-    cJSON_AddNumberToObject(p, "sck", s.pins.sck);
-    cJSON_AddNumberToObject(p, "mosi", s.pins.mosi);
-    cJSON_AddNumberToObject(p, "dc", s.pins.dc);
-    cJSON_AddNumberToObject(p, "cs", s.pins.cs);
-    cJSON_AddNumberToObject(p, "rst", s.pins.rst);
-    cJSON_AddNumberToObject(p, "bl", s.pins.bl);
-    cJSON_AddNumberToObject(p, "spi", s.pins.spi);
-    cJSON_AddNumberToObject(p, "baud", s.pins.baud);
-    cJSON_AddNumberToObject(p, "rotation", s.pins.rotation);
-    cJSON_AddNumberToObject(o, "supervision_probe_ms", s.supervision_probe_ms);
-    cJSON_AddNumberToObject(o, "supervision_node_ms", s.supervision_node_ms);
-    cJSON_AddNumberToObject(o, "peer_latency_max", s.peer_latency_max);
-    cJSON_AddStringToObject(o, "coex", s.coex.c_str());
+    for (const PinField &pf : kPins) cJSON_AddNumberToObject(p, pf.name, s.pins.*pf.member);
     return o;
 }
-
-}  // namespace core
-
-namespace core {
 
 namespace {
 
@@ -236,15 +235,18 @@ struct Check {
         out = v->valuestring;
         return true;
     }
-    bool one_of(std::string &out, std::initializer_list<const char *> opts)
+    bool one_of(std::string &out, const std::string &choices)       // "a,b,c"
     {
         std::string all;
-        for (const char *o : opts) {
-            if (cJSON_IsString(v) && strcmp(v->valuestring, o) == 0) {
-                out = o;
+        for (size_t at = 0; at <= choices.size();) {
+            size_t end = std::min(choices.find(',', at), choices.size());
+            std::string opt = choices.substr(at, end - at);
+            if (cJSON_IsString(v) && opt == v->valuestring) {
+                out = opt;
                 return true;
             }
-            all += all.empty() ? o : std::string(", ") + o;
+            all += (all.empty() ? "" : ", ") + opt;
+            at = end + 1;
         }
         return fail("one of " + all);
     }
@@ -276,6 +278,24 @@ struct Check {
         out = v->valuestring;
         return true;
     }
+    // One row of kFields.
+    bool field(const Field &f, Settings &n)
+    {
+        if (auto m = std::get_if<int Settings::*>(&f.member))
+            return num(n.**m, static_cast<int>(f.lo), static_cast<int>(f.hi));
+        if (auto m = std::get_if<double Settings::*>(&f.member)) return real(n.**m, f.lo, f.hi);
+        if (auto m = std::get_if<bool Settings::*>(&f.member)) return flag(n.**m);
+        std::string &out = n.**std::get_if<std::string Settings::*>(&f.member);
+        if (f.flags & PASSWORD) return password(out);
+        if (f.choices) return one_of(out, f.choices);
+        std::string text;
+        size_t max = static_cast<size_t>(f.hi);
+        if (!str(text, max)) return false;
+        if ((f.flags & EXACT) && !text.empty() && text.size() != max)
+            return fail(std::to_string(max) + " characters");
+        if (!(f.flags & KEEP_BLANK) || !text.empty()) out = text;
+        return true;
+    }
 };
 
 bool is_hex(const std::string &s)
@@ -290,12 +310,6 @@ std::string upper(std::string s)
     for (char &c : s) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
     return s;
 }
-
-// Keys that take effect only after a restart.
-const std::set<std::string> kRebootKeys = {
-    "linked_scan_duty", "screen", "battery_pin", "hostname", "ap_password", "serial", "dis_model",
-    "max_conn", "pins", "role", "split_peer", "split_key", "split_port", "wifi_ssid", "wifi_password",
-    "supervision_probe_ms", "supervision_node_ms", "peer_latency_max", "coex"};
 
 }  // namespace
 
@@ -312,12 +326,12 @@ bool apply_config(Settings &s, const cJSON *req, std::string &err, bool &reboot)
         const std::string k = v->string;
         Check c{v, v->string, err};
         bool ok = true;
-        if (k == "unit") ok = c.one_of(n.unit, {"c", "f"});
-        else if (k == "layout") ok = c.one_of(n.layout, {"rotate", "quad"});
-        else if (k == "rotate_s") ok = c.num(n.rotate_s, 2, 120);
-        else if (k == "brightness") ok = c.num(n.brightness, 5, 100);
-        else if (k == "status_page") ok = c.flag(n.status_page);
-        else if (k == "readings") {
+        auto f = std::find_if(std::begin(kFields), std::end(kFields), [&](const Field &x) { return k == x.name; });
+        if (f != std::end(kFields)) {
+            if (f->flags & FIXED) continue;
+            ok = c.field(*f, n);
+            rb = rb || (f->flags & REBOOT);
+        } else if (k == "readings") {
             if (!cJSON_IsArray(v) || cJSON_GetArraySize(v) > 16) {
                 ok = c.fail("a list of at most 16 readings");
             } else {
@@ -344,9 +358,7 @@ bool apply_config(Settings &s, const cJSON *req, std::string &err, bool &reboot)
             bool probes = k == "linked_probes";
             size_t len = probes ? 8 : 10;
             std::vector<std::string> out;
-            if (!probes && cJSON_IsString(v)) {         // a single serial (older pages)
-                if (*v->valuestring) out.push_back(v->valuestring);
-            } else if (cJSON_IsArray(v)) {
+            if (cJSON_IsArray(v)) {
                 const cJSON *e;
                 cJSON_ArrayForEach(e, v) {
                     if (!cJSON_IsString(e)) {
@@ -365,14 +377,7 @@ bool apply_config(Settings &s, const cJSON *req, std::string &err, bool &reboot)
             if (probes && out.size() > 8) out.resize(8);
             if (!ok) c.fail(probes ? "a list of 8-digit probe serials" : "a list of 10-character node serials");
             else (probes ? n.linked_probes : n.upstream_node) = out;
-        } else if (k == "repeat_adverts") ok = c.one_of(n.repeat_adverts, {"all", "linked", "off"});
-        else if (k == "meatnet_peer") ok = c.flag(n.meatnet_peer);
-        else if (k == "upstream_push") ok = c.flag(n.upstream_push);
-        else if (k == "inbound_reserve") ok = c.num(n.inbound_reserve, 0, 4);
-        else if (k == "auto_standby_min") ok = c.num(n.auto_standby_min, 0, 1440);
-        else if (k == "meater_bridge") ok = c.flag(n.meater_bridge);
-        else if (k == "meater_direct_adverts") ok = c.flag(n.meater_direct_adverts);
-        else if (k == "meater_probes") {
+        } else if (k == "meater_probes") {
             if (!cJSON_IsArray(v) || cJSON_GetArraySize(v) > 8) {
                 ok = c.fail("a list of at most 8 MEATERs");
             } else {
@@ -395,49 +400,21 @@ bool apply_config(Settings &s, const cJSON *req, std::string &err, bool &reboot)
                     n.meater_probes.push_back(m);
                 }
             }
-        } else if (k == "battery_divider") ok = c.real(n.battery_divider, 0.1, 20);
-        else if (k == "dis_firmware") ok = c.str(n.dis_firmware, 16);
-        else if (k == "linked_scan_duty") ok = c.num(n.linked_scan_duty, 5, 50);
-        else if (k == "screen") ok = c.flag(n.screen);
-        else if (k == "battery_pin") ok = c.num(n.battery_pin, -1, 48);
-        else if (k == "hostname") ok = c.str(n.hostname, 32);
-        else if (k == "ap_password") ok = c.password(n.ap_password);
-        else if (k == "serial") {
-            ok = c.str(n.serial, 10) && (n.serial.empty() || n.serial.size() == 10 || c.fail("10 characters"));
-        } else if (k == "dis_model") ok = c.str(n.dis_model, 32);
-        else if (k == "max_conn") ok = c.num(n.max_conn, 1, 9);
-        else if (k == "pins") {
+        } else if (k == "pins") {
+            rb = true;
             if (!cJSON_IsObject(v)) {
                 ok = c.fail("an object");
             } else {
                 const cJSON *p;
                 cJSON_ArrayForEach(p, v) {
                     Check pc{p, p->string, err};
-                    std::string pk = p->string;
-                    int *slot = pk == "sck" ? &n.pins.sck : pk == "mosi" ? &n.pins.mosi : pk == "dc" ? &n.pins.dc
-                              : pk == "cs" ? &n.pins.cs : pk == "rst" ? &n.pins.rst : pk == "bl" ? &n.pins.bl
-                              : pk == "spi" ? &n.pins.spi : pk == "rotation" ? &n.pins.rotation : nullptr;
-                    if (pk == "baud") ok = pc.num(n.pins.baud, 1000000, 80000000);
-                    else if (pk == "rotation") ok = pc.num(n.pins.rotation, 0, 3);
-                    else if (slot) ok = pc.num(*slot, -1, 48);
+                    for (const PinField &pf : kPins)
+                        if (strcmp(p->string, pf.name) == 0) ok = pc.num(n.pins.*pf.member, pf.lo, pf.hi);
                     if (!ok) break;
                 }
             }
-        } else if (k == "role") ok = c.one_of(n.role, {"standalone", "app", "field"});
-        else if (k == "split_peer") ok = c.str(n.split_peer, 64);
-        else if (k == "split_key") {
-            std::string key;
-            ok = c.str(key, 64);
-            if (ok && !key.empty()) n.split_key = key;      // blank = keep
-        } else if (k == "split_port") ok = c.num(n.split_port, 1, 65535);
-        else if (k == "wifi_ssid") ok = c.str(n.wifi_ssid, 32);
-        else if (k == "wifi_password") ok = c.password(n.wifi_password);
-        else if (k == "supervision_probe_ms") ok = c.num(n.supervision_probe_ms, 1000, 32000);
-        else if (k == "supervision_node_ms") ok = c.num(n.supervision_node_ms, 1000, 32000);
-        else if (k == "peer_latency_max") ok = c.num(n.peer_latency_max, 0, 10);
-        else if (k == "coex") ok = c.one_of(n.coex, {"bt", "balance", "wifi"});
+        }
         if (!ok) return false;
-        rb = rb || kRebootKeys.count(k);
     }
     s = n;
     reboot = rb;

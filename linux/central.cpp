@@ -16,7 +16,7 @@ static constexpr size_t KEEP = 128;
 // reported ones are touched on the loop thread only.
 struct Central::Link {
     Bytes key;
-    std::string kind, address, state = "idle", desc;
+    std::string kind, address, state = "idle";
     bool enabled = true;
     int mtu = 23;
     uint32_t count = 0, connects = 0;
@@ -285,7 +285,7 @@ void Central::shutdown()
     }
 }
 
-split::FieldSource::Tables Central::tables()
+core::RadioSource::Tables Central::tables()
 {
     std::lock_guard<std::mutex> g(mu_);
     return tables_;
@@ -325,17 +325,16 @@ void Central::discovery(bool on)
 
 // -- links ------------------------------------------------------------------------------------
 
-std::vector<split::LinkReport> Central::collect_links()
+std::vector<core::LinkReport> Central::collect_links()
 {
-    std::vector<split::LinkReport> out;
+    std::vector<core::LinkReport> out;
     std::lock_guard<std::mutex> g(mu_);
     for (auto &kv : links_) {
         Link &l = *kv.second;
-        split::LinkReport r;
+        core::LinkReport r;
         r.key = l.key;
         r.kind = l.kind;
         r.state = l.state;
-        r.desc = l.desc;
         r.mtu = l.mtu;
         r.count = l.count;
         r.info = l.info;
@@ -355,9 +354,8 @@ std::vector<core::LinkSummary> Central::link_summaries()
     std::lock_guard<std::mutex> g(mu_);
     for (auto &kv : links_) {
         const Link &l = *kv.second;
-        std::string name = l.kind == "probe" ? protocol::probe_serial_str(l.key)
-                         : l.kind == "meater" ? l.address : protocol::serial10_str(l.key);
-        out.push_back({l.kind, name, l.state, l.count, l.mtu, core::link_stats(l.connects, l.drops, "", "")});
+        out.push_back({l.kind, core::link_name(l.key, l.kind), l.state, l.count, l.mtu,
+                       core::link_stats(l.connects, l.drops, "", "")});
     }
     return out;
 }
@@ -577,7 +575,7 @@ struct Central::Discovery {
     std::map<std::string, std::pair<std::string, std::vector<std::string>>> chars;   // uuid -> (path, flags)
     int mtu = 23;
     std::map<std::string, std::string> notify, info;
-    std::string desc, write_path;
+    std::string write_path;
     bool write_response = false;
     size_t dis_next = 0;
 };
@@ -586,7 +584,7 @@ void Central::link_discover(Link &l)
 {
     if (l.discovering) return;
     l.discovering = true;
-    auto *d = new Discovery{this, l.key, l.connects, {}, 23, {}, {}, "", "", false, 0};
+    auto *d = new Discovery{this, l.key, l.connects, {}, 23, {}, {}, "", false, 0};
     g_dbus_connection_call(
         bus_, gdbus::BLUEZ, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", nullptr,
         G_VARIANT_TYPE("(a{oa{sa{sv}}})"), G_DBUS_CALL_FLAGS_NONE, 5000, nullptr,
@@ -673,7 +671,6 @@ void Central::discover_objects(Discovery *d, GVariant *r)
         }
         gdbus::call(bus_, c->second.first.c_str(), "org.bluez.GattCharacteristic1", "StartNotify", nullptr, 5000);
         d->notify[c->second.first] = s.name;
-        d->desc += (d->desc.empty() ? "" : ", ") + std::string(s.name) + " notify on";
     }
     if (l.kind != "meater") {
         auto w = d->chars.find(gdbus::uuid_lower(protocol::UART_RX_CHAR_UUID));
@@ -681,7 +678,6 @@ void Central::discover_objects(Discovery *d, GVariant *r)
             d->write_path = w->second.first;
             auto &fl = w->second.second;
             d->write_response = std::find(fl.begin(), fl.end(), "write-without-response") == fl.end();
-            d->desc += std::string(", write (") + (d->write_response ? "with response" : "no response") + ")";
         }
     }
     discover_next_dis(d);
@@ -731,7 +727,6 @@ void Central::discover_next_dis(Discovery *d)
         l.write_response = d->write_response;
         l.info = std::move(d->info);
         l.mtu = d->mtu;
-        l.desc = d->desc;
         l.state = "ready";
     }
     log_("[links] " + l.kind + " " + l.address + " ready: setup took " + std::to_string(core::ticks_ms() - l.connect_at) +

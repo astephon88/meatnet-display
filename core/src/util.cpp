@@ -1,6 +1,8 @@
 #include "util.h"
 
 #include <chrono>
+#include <cstdarg>
+#include <cstdio>
 #include <ctime>
 
 namespace core {
@@ -15,6 +17,17 @@ uint32_t unix_time()
 {
     std::time_t t = std::time(nullptr);
     return t > 1600000000 ? static_cast<uint32_t>(t) : 0;
+}
+
+void logf(const LogFn &log, const char *fmt, ...)
+{
+    if (!log) return;
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    log(buf);
 }
 
 bool RecentIds::seen(uint64_t id)

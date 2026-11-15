@@ -832,20 +832,20 @@ void Links::tick()
     unlock();
 }
 
-std::vector<LinkReport> Links::collect()
+std::vector<core::LinkReport> Links::collect()
 {
-    std::vector<LinkReport> out;
+    std::vector<core::LinkReport> out;
     lock();
     for (auto &kv : links_) {
         Link &l = *kv.second;
-        LinkReport r;
+        core::LinkReport r;
         r.key = l.key;
         r.kind = l.kind;
         r.state = l.state;
-        r.desc = l.state == "ready" ? describe(l) : "";
         r.mtu = l.mtu;
         r.count = l.count;
         r.info = l.info;
+        r.has_stats = true;
         r.connects = l.connects;
         r.drops = l.drops;
         r.params = l.params;
@@ -861,22 +861,14 @@ std::vector<LinkReport> Links::collect()
     return out;
 }
 
-std::vector<std::string> Links::collect_states()
+std::vector<core::LinkSummary> Links::summaries()
 {
-    std::vector<std::string> out;
-    lock();
-    for (auto &kv : links_) out.push_back(kv.second->state);
-    unlock();
-    return out;
-}
-
-std::vector<LinkBrief> Links::collect_brief()
-{
-    std::vector<LinkBrief> out;
+    std::vector<core::LinkSummary> out;
     lock();
     for (auto &kv : links_) {
         const Link &l = *kv.second;
-        out.push_back({l.key, l.kind, l.state, l.mtu, l.count, l.connects, l.drops, l.params, l.asked});
+        out.push_back({l.kind, core::link_name(l.key, l.kind), l.state, l.count, l.mtu,
+                       core::link_stats(l.connects, l.drops, l.params, l.asked)});
     }
     unlock();
     return out;

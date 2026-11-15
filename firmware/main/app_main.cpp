@@ -1,9 +1,10 @@
-// MeatNet field unit (ESP-IDF). See ../docs/field-unit-idf-plan.md.
+// MeatNet unit (ESP-IDF): the standalone, app or field role, as saved in NVS.
 //
-// Joins WiFi with the settings saved in NVS, scans with NimBLE, holds the
-// links the app unit asks for, and streams everything to the app unit over
-// the split protocol. Settings are changed on the unit's web page; with no
-// WiFi set up (or none reachable) it also opens a setup network for that.
+// Joins WiFi, runs the radio (scanning and links: standalone and field) and
+// the MeatNet node (standalone and app); a field unit streams its radio to
+// the app unit over the split protocol. Settings are changed on the unit's
+// web page; with no WiFi set up (or none reachable) it also opens a setup
+// network for that.
 
 #include <algorithm>
 #include <atomic>
@@ -12,18 +13,11 @@
 #include <string>
 
 #include "cJSON.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
-#include "esp_adc/adc_oneshot.h"
-#include "esp_coexist.h"
-#include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
-#include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
-#include "mdns.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -34,13 +28,12 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 
-#include "captive.h"
+#include "battery.h"
 #include "links.h"
 #include "proto.h"
 #include "radio.h"
 #include "screen.h"
-#include "esp_transport.h"
-#include "field_source.h"
+#include "esp_radio.h"
 #include "linktable.h"
 #include "log_ring.h"
 #include "node.h"
@@ -52,12 +45,12 @@
 #include "status.h"
 #include "util.h"
 #include "web.h"
+#include "wifi.h"
 
-static const char *TAG = "field";
+static const char *TAG = "main";
 
 static EventGroupHandle_t g_events;
-static constexpr EventBits_t kWifiUp = BIT0;
-static constexpr EventBits_t kBleReady = BIT1;
+static constexpr EventBits_t kBleReady = BIT0;
 
 // -- NimBLE host ----------------------------------------------------------------
 
@@ -170,211 +163,11 @@ static void radio_task(void *)
     }
 }
 
-// -- WiFi --------------------------------------------------------------------------
-
-static constexpr int64_t kSetupApAfterMs = 30000;   // no IP this long: open the setup network
-// While the setup network is up, WiFi is retried this rarely: every attempt
-// scans all channels, and the setup network (same radio) can't be joined
-// meanwhile. No retries at all while a phone is on the setup network.
-static constexpr int64_t kSetupRetryMs = 60000;
-
-static portMUX_TYPE g_net_mux = portMUX_INITIALIZER_UNLOCKED;
-static char g_ip[16] = "";
-static char g_setup_ap[33] = "";       // setup network's SSID while it is up
-static esp_timer_handle_t g_ap_timer;
-static esp_timer_handle_t g_retry_timer;
-static std::atomic<int> g_ap_clients{0};
-static esp_netif_ip_info_t g_ap_ip;    // the setup network's address (192.168.4.1)
-
-static void set_net(char *dst, size_t n, const char *value)
-{
-    portENTER_CRITICAL(&g_net_mux);
-    strlcpy(dst, value, n);
-    portEXIT_CRITICAL(&g_net_mux);
-}
-
-static std::string get_net(const char *src)
-{
-    portENTER_CRITICAL(&g_net_mux);
-    std::string v(src);
-    portEXIT_CRITICAL(&g_net_mux);
-    return v;
-}
-
-// Setup network "MeatNet-<serial>" next to the station, so the web page can
-// be reached at 192.168.4.1 to enter (or fix) the WiFi settings. Open unless
-// a setup password is saved; its DNS sends phones to the page (captive
-// portal).
-static void setup_ap_start(void * = nullptr)
-{
-    if (!get_net(g_setup_ap).empty()) return;
-    std::string ssid = "MeatNet-" + g_serial;
-    std::string pw = settings::get().ap_password;
-    wifi_config_t ap;
-    memset(&ap, 0, sizeof(ap));
-    strlcpy((char *)ap.ap.ssid, ssid.c_str(), sizeof(ap.ap.ssid));
-    ap.ap.ssid_len = ssid.size();
-    strlcpy((char *)ap.ap.password, pw.c_str(), sizeof(ap.ap.password));
-    ap.ap.authmode = pw.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
-    ap.ap.max_connection = 2;
-    ap.ap.channel = 1;
-    // The station stays on (idle without a network) so the page can scan.
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-    esp_wifi_set_config(WIFI_IF_AP, &ap);
-    set_net(g_setup_ap, sizeof(g_setup_ap), ssid.c_str());
-    captive::start(g_ap_ip.ip.addr);
-    esp_wifi_disconnect();          // stop the current attempt; retried slowly from now on
-    ESP_LOGW(TAG, "setup network '%s' up (%s): settings at http://" IPSTR "/", ssid.c_str(),
-             pw.empty() ? "open" : "WPA2", IP2STR(&g_ap_ip.ip));
-}
-
-static void setup_ap_stop()
-{
-    if (get_net(g_setup_ap).empty()) return;
-    esp_timer_stop(g_retry_timer);
-    captive::stop();
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    set_net(g_setup_ap, sizeof(g_setup_ap), "");
-    ESP_LOGI(TAG, "setup network closed");
-}
-
-static void sta_retry(void *)
-{
-    if (g_ap_clients > 0)
-        esp_timer_start_once(g_retry_timer, kSetupRetryMs * 1000);   // a phone is setting us up
-    else
-        esp_wifi_connect();
-}
-
-static void mdns_start();
-
-static void wifi_event(void *, esp_event_base_t base, int32_t id, void *data)
-{
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        if (!settings::get().wifi_ssid.empty()) esp_wifi_connect();
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupClearBits(g_events, kWifiUp);
-        set_net(g_ip, sizeof(g_ip), "");
-        if (get_net(g_setup_ap).empty()) {
-            ESP_LOGW(TAG, "WiFi disconnected, retrying");
-            esp_wifi_connect();
-        } else if (!esp_timer_is_active(g_retry_timer)) {
-            ESP_LOGW(TAG, "WiFi not reachable; retrying in %llds (setup network up)",
-                     (long long)(kSetupRetryMs / 1000));
-            esp_timer_start_once(g_retry_timer, kSetupRetryMs * 1000);
-        }
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
-        g_ap_clients++;
-        ESP_LOGI(TAG, "a device joined the setup network (%d on it)", g_ap_clients.load());
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
-        if (g_ap_clients > 0) g_ap_clients--;
-        ESP_LOGI(TAG, "a device left the setup network (%d on it)", g_ap_clients.load());
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        auto *ev = static_cast<ip_event_got_ip_t *>(data);
-        char ip[16];
-        snprintf(ip, sizeof(ip), IPSTR, IP2STR(&ev->ip_info.ip));
-        set_net(g_ip, sizeof(g_ip), ip);
-        ESP_LOGI(TAG, "WiFi up, IP %s", ip);
-        mdns_start();
-        esp_timer_stop(g_ap_timer);
-        setup_ap_stop();
-        xEventGroupSetBits(g_events, kWifiUp);
-    }
-}
-
-// <hostname>.local, and the web page as an _http._tcp service.
-static void mdns_start()
-{
-    static bool started = false;
-    if (started) return;
-    started = true;
-    if (mdns_init() != ESP_OK) return;
-    mdns_hostname_set(g_cfg.hostname.c_str());
-    mdns_instance_name_set(("MeatNet " + g_serial).c_str());
-    mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
-    ESP_LOGI(TAG, "mDNS: %s.local", g_cfg.hostname.c_str());
-}
-
-static void wifi_start()
-{
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_t *sta = esp_netif_create_default_wifi_sta();
-    esp_netif_set_hostname(sta, g_cfg.hostname.c_str());     // DHCP; mDNS once WiFi is up
-    esp_netif_t *ap = esp_netif_create_default_wifi_ap();
-    // The setup network's DHCP hands out the unit itself as DNS server, and
-    // the page as captive-portal address (RFC 8910) for phones that ask.
-    static char portal_uri[32];
-    esp_netif_get_ip_info(ap, &g_ap_ip);
-    snprintf(portal_uri, sizeof(portal_uri), "http://" IPSTR "/", IP2STR(&g_ap_ip.ip));
-    esp_netif_dns_info_t dns = {};
-    dns.ip.type = ESP_IPADDR_TYPE_V4;
-    dns.ip.u_addr.ip4 = g_ap_ip.ip;
-    uint8_t offer_dns = 1;
-    esp_netif_dhcps_stop(ap);
-    esp_netif_set_dns_info(ap, ESP_NETIF_DNS_MAIN, &dns);
-    esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer_dns,
-                           sizeof(offer_dns));
-    esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI, portal_uri,
-                           strlen(portal_uri));
-    esp_netif_dhcps_start(ap);
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, nullptr));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, nullptr));
-    esp_timer_create_args_t ta = {};
-    ta.callback = setup_ap_start;
-    ta.name = "setup_ap";
-    ESP_ERROR_CHECK(esp_timer_create(&ta, &g_ap_timer));
-    ta.callback = sta_retry;
-    ta.name = "sta_retry";
-    ESP_ERROR_CHECK(esp_timer_create(&ta, &g_retry_timer));
-
-    // Builds that set WiFi in Kconfig left it in the WiFi driver's own NVS
-    // storage: take it over once, then clear that copy so the credentials
-    // live in one place only.
-    wifi_config_t wc;
-    memset(&wc, 0, sizeof(wc));
-    if (esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK && wc.sta.ssid[0]) {
-        settings::adopt_wifi((const char *)wc.sta.ssid, (const char *)wc.sta.password);
-        esp_wifi_restore();
-    }
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-
-    const core::Settings s = settings::get();
-    if (s.wifi_ssid.empty()) {
-        ESP_LOGW(TAG, "no WiFi network set");
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-        ESP_ERROR_CHECK(esp_wifi_start());
-        setup_ap_start();
-    } else {
-        memset(&wc, 0, sizeof(wc));
-        strlcpy((char *)wc.sta.ssid, s.wifi_ssid.c_str(), sizeof(wc.sta.ssid));
-        strlcpy((char *)wc.sta.password, s.wifi_password.c_str(), sizeof(wc.sta.password));
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
-        ESP_ERROR_CHECK(esp_wifi_start());
-        esp_timer_start_once(g_ap_timer, kSetupApAfterMs * 1000);
-        ESP_LOGI(TAG, "joining WiFi '%s'", s.wifi_ssid.c_str());
-    }
-    // Who gets the shared radio when WiFi and Bluetooth both want it. The
-    // API is deprecated in this IDF and may be a no-op on some chips: log
-    // the result instead of assuming it helps.
-    esp_coex_prefer_t pref = s.coex == "wifi" ? ESP_COEX_PREFER_WIFI
-                           : s.coex == "balance" ? ESP_COEX_PREFER_BALANCE : ESP_COEX_PREFER_BT;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    esp_err_t cx = esp_coex_preference_set(pref);
-#pragma GCC diagnostic pop
-    ESP_LOGI(TAG, "coexistence preference %s: %s", s.coex.c_str(), esp_err_to_name(cx));
-}
-
-// -- main ---------------------------------------------------------------------------
-
 // -- app and standalone roles: the MeatNet node ----------------------------------------
 
 static core::LinkTable g_link_table;
-static esp::EspTransport *g_local = nullptr;
+static radio::EspRadio g_radio;
+static core::LocalTransport *g_local = nullptr;
 static split::RemoteRadio *g_remote = nullptr;
 static split::SplitServer *g_server = nullptr;
 
@@ -400,45 +193,6 @@ static NodeStatus node_status()
 }
 
 static void node_log(const std::string &m) { ESP_LOGI("node", "%s", m.c_str()); }
-
-// The battery divider's pin in microvolts (ADC1 with curve-fitting
-// calibration), or nothing when there is no battery pin.
-static std::optional<double> battery_uv()
-{
-    static adc_oneshot_unit_handle_t unit;
-    static adc_cali_handle_t cali;
-    static adc_channel_t ch;
-    static int state = 0;               // 0 = not set up yet, 1 = ready, -1 = unavailable
-    if (state == 0) {
-        state = -1;
-        adc_unit_t id;
-        if (g_cfg.battery_pin < 0) return std::nullopt;
-        if (adc_oneshot_io_to_channel(g_cfg.battery_pin, &id, &ch) != ESP_OK || id != ADC_UNIT_1) {
-            ESP_LOGW(TAG, "battery pin %d has no ADC1 channel", g_cfg.battery_pin);
-            return std::nullopt;
-        }
-        adc_oneshot_unit_init_cfg_t uc = {};
-        uc.unit_id = id;
-        adc_oneshot_chan_cfg_t cc = {};
-        cc.atten = ADC_ATTEN_DB_12;
-        cc.bitwidth = ADC_BITWIDTH_DEFAULT;
-        adc_cali_curve_fitting_config_t kc = {};
-        kc.unit_id = id;
-        kc.chan = ch;
-        kc.atten = ADC_ATTEN_DB_12;
-        kc.bitwidth = ADC_BITWIDTH_DEFAULT;
-        if (adc_oneshot_new_unit(&uc, &unit) != ESP_OK || adc_oneshot_config_channel(unit, ch, &cc) != ESP_OK ||
-            adc_cali_create_scheme_curve_fitting(&kc, &cali) != ESP_OK) {
-            ESP_LOGW(TAG, "battery ADC unavailable");
-            return std::nullopt;
-        }
-        state = 1;
-    }
-    int raw, mv;
-    if (state != 1 || adc_oneshot_read(unit, ch, &raw) != ESP_OK || adc_cali_raw_to_voltage(cali, raw, &mv) != ESP_OK)
-        return std::nullopt;
-    return mv * 1000.0;
-}
 
 // The web page's standby button, carried out by the node task.
 static std::atomic<int> g_power_req{0};     // 1 = standby, 2 = wake
@@ -478,7 +232,7 @@ static void node_task(void *)
 {
     protocol::set_random_source([] { return static_cast<uint32_t>(esp_random()); });
     bool standalone = g_role == "standalone";
-    g_local = new esp::EspTransport(standalone);
+    g_local = new core::LocalTransport(periph::Peripheral::get(), standalone ? &g_radio : nullptr);
     core::Transport *t = g_local;
     if (!standalone) t = g_remote = new split::RemoteRadio(g_local, node_log);
     // Standalone: phones and links share this radio's connections.
@@ -488,7 +242,7 @@ static void node_task(void *)
                                                     : static_cast<size_t (*)()>(nullptr));
     core::Node node(*t, g_cfg, g_serial, node_log, &g_link_table);
     core::PowerManager::Hooks hooks;
-    hooks.read_uv = battery_uv;
+    hooks.read_uv = [] { return battery_uv(g_cfg.battery_pin); };
     hooks.apply = [](bool on) {
         screen::set_sleep(on);
         esp_wifi_set_ps(on ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM);
@@ -540,55 +294,14 @@ static void server_start()
     ESP_LOGI(TAG, "listening for the field unit on port %d", cfg.port);
 }
 
-// /api/state for the web page.
 static split::SplitClient *g_client = nullptr;
-
-// A link's name for the screen: node serial, probe serial, or MEATER.
-static std::string link_name(const radio::LinkBrief &l)
-{
-    if (l.kind == "node") return l.key;                         // 10 ASCII characters
-    if (l.kind == "probe" && l.key.size() == 4) {               // little-endian serial
-        char buf[9];
-        snprintf(buf, sizeof(buf), "%02X%02X%02X%02X", (uint8_t)l.key[3], (uint8_t)l.key[2],
-                 (uint8_t)l.key[1], (uint8_t)l.key[0]);
-        return buf;
-    }
-    return "MEATER";
-}
 
 // A field unit has no Node: its part of /api/state comes from the radio.
 static cJSON *field_json()
 {
-    radio::Radio &r = radio::Radio::get();
-    std::map<core::Bytes, core::Observation> direct, nodes, meaters;
-    auto copy = [](const radio::Table &from, std::map<core::Bytes, core::Observation> &to) {
-        for (auto &kv : from) {
-            core::Observation o;
-            o.body = kv.second.body;
-            o.name = kv.second.name;
-            o.ticks = kv.second.ms;
-            o.rssi = kv.second.rssi;
-            to[kv.first] = o;
-        }
-    };
-    r.lock();
-    copy(r.direct, direct);
-    copy(r.nodes, nodes);
-    copy(r.meaters, meaters);
-    r.unlock();
-    std::vector<core::LinkSummary> links;
-    for (auto &l : radio::Links::get().collect_brief()) {
-        core::LinkSummary ls;
-        ls.kind = l.kind;
-        ls.serial = link_name(l);
-        ls.state = l.state;
-        ls.count = l.count;
-        ls.mtu = l.mtu;
-        ls.stats = core::link_stats(l.connects, l.drops, l.params, l.asked);
-        links.push_back(ls);
-    }
-    return core::field_status(direct, nodes, meaters, links, CONFIG_BT_NIMBLE_MAX_CONNECTIONS,
-                              radio::Radio::now_ms());
+    core::RadioSource::Tables t = g_radio.tables();
+    return core::field_status(t.direct, t.nodes, t.meaters, g_radio.link_summaries(),
+                              CONFIG_BT_NIMBLE_MAX_CONNECTIONS, core::ticks_ms());
 }
 
 // /api/state for the web page: the Node's (or the field radio's) tables plus
@@ -607,39 +320,25 @@ static cJSON *state_json()
     cJSON_AddStringToObject(o, "serial", g_serial.c_str());
     cJSON_DeleteItemFromObject(o, "role");
     cJSON_AddStringToObject(o, "role", g_role.c_str());
-    std::string ap = get_net(g_setup_ap), ip = get_net(g_ip);
+    std::string ap = wifi::setup_ssid(), ip = wifi::ip();
     cJSON *w = cJSON_AddObjectToObject(o, "wifi");
     cJSON_AddStringToObject(w, "mode", !ip.empty() ? "sta" : !ap.empty() ? "ap" : "connecting");
-    char ap_ip[16];
-    snprintf(ap_ip, sizeof(ap_ip), IPSTR, IP2STR(&g_ap_ip.ip));
-    cJSON_AddStringToObject(w, "ip", !ip.empty() ? ip.c_str() : !ap.empty() ? ap_ip : "");
+    cJSON_AddStringToObject(w, "ip", !ip.empty() ? ip.c_str() : !ap.empty() ? wifi::setup_ip().c_str() : "");
     cJSON_AddStringToObject(w, "ssid", settings::get().wifi_ssid.c_str());
     cJSON_AddStringToObject(w, "ap_ssid", ap.c_str());
     cJSON_AddNumberToObject(o, "heap", esp_get_free_heap_size());
     cJSON_AddNumberToObject(o, "uptime", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddStringToObject(o, "display", "GC9A01A 240x240");
     if (!cJSON_GetObjectItem(o, "power")) cJSON_AddNullToObject(o, "power");
-    cJSON *sp = cJSON_AddObjectToObject(o, "split");
-    if (g_role == "field") {
-        bool up = g_client && g_client->connected();
-        cJSON_AddBoolToObject(sp, "connected", up);
-        if (up) {
-            cJSON_AddStringToObject(sp, "peer", g_client->peer().c_str());
-            cJSON_AddStringToObject(sp, "ip", g_client->peer_ip().c_str());
-            cJSON_AddNumberToObject(sp, "rtt_ms", g_client->rtt_ms());
-        }
-    } else if (g_role == "app") {
-        cJSON_AddBoolToObject(sp, "connected", st.field_connected);
-        if (st.field_connected) {
-            cJSON_AddStringToObject(sp, "peer", st.field_peer.c_str());
-            cJSON_AddStringToObject(sp, "ip", st.field_ip.c_str());
-            cJSON_AddNumberToObject(sp, "rtt_ms", st.field_rtt_ms);
-            cJSON_AddNumberToObject(sp, "max_conn", st.field_max_conn);
-        }
-    } else {
-        cJSON_DeleteItemFromObject(o, "split");
+    if (g_role == "field")
+        cJSON_AddItemToObject(o, "split", g_client ? core::split_status(g_client->connected(), g_client->peer(),
+                                                                         g_client->peer_ip(), g_client->rtt_ms())
+                                                   : core::split_status(false, "", "", -1));
+    else if (g_role == "app")
+        cJSON_AddItemToObject(o, "split", core::split_status(st.field_connected, st.field_peer, st.field_ip,
+                                                             st.field_rtt_ms, st.field_max_conn));
+    else
         cJSON_AddNullToObject(o, "split");
-    }
     return o;
 }
 
@@ -650,11 +349,9 @@ static screen_draw::View screen_view()
     static int page = 0;
     static int64_t page_at = 0;
     core::Settings cfg = settings::get();
-    std::string ap = get_net(g_setup_ap), ip = get_net(g_ip);
+    std::string ap = wifi::setup_ssid(), ip = wifi::ip();
     std::string mode = !ap.empty() ? "ap" : !ip.empty() ? "sta" : "connecting";
-    char ap_ip[16];
-    snprintf(ap_ip, sizeof(ap_ip), IPSTR, IP2STR(&g_ap_ip.ip));
-    std::string shown_ip = !ap.empty() ? ap_ip : ip;
+    std::string shown_ip = !ap.empty() ? wifi::setup_ip() : ip;
     std::vector<readings::Item> items;
     if (g_role == "field") {
         cJSON *st = field_json();
@@ -717,9 +414,7 @@ static void split_start()
     cfg.serial = g_serial;
     cfg.max_conn = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
     cfg.mac = radio::Radio::get().address();
-    cfg.impl = "idf";
-    static radio::FieldSource source;
-    static split::FieldRadio fradio(source);
+    static split::FieldRadio fradio(g_radio);
     // Messages come prefixed "[split] "; ESP-IDF's tag says that already.
     g_client = new split::SplitClient(fradio, cfg, [](const std::string &m) {
         ESP_LOGI("split", "%s", m.compare(0, 8, "[split] ") == 0 ? m.c_str() + 8 : m.c_str());
@@ -742,7 +437,7 @@ extern "C" void app_main(void)
     settings::load();
     g_events = xEventGroupCreate();
 
-    // Serial: the last 10 hex digits of the WiFi MAC, as the MicroPython unit.
+    // Serial: the last 10 hex digits of the WiFi MAC.
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char serial[11];
@@ -753,7 +448,7 @@ extern "C" void app_main(void)
     if (!g_cfg.serial.empty()) g_serial = g_cfg.serial;
     ESP_LOGI(TAG, "MeatNet %s unit (ESP-IDF), serial %s", g_role.c_str(), g_serial.c_str());
 
-    wifi_start();
+    wifi::start(g_serial, g_cfg);
     web::Handlers h;
     h.state = state_json;
     h.config_changed = [] { g_cfg_changed = true; };
@@ -771,7 +466,7 @@ extern "C" void app_main(void)
         cJSON_Delete(st);
         return o;
     };
-    web::start(h, g_ap_ip.ip.addr);
+    web::start(h, wifi::setup_addr());
     if (g_cfg.screen) screen::start(g_cfg.pins, screen_view);
     ble_start();
     xEventGroupWaitBits(g_events, kBleReady, pdFALSE, pdTRUE, portMAX_DELAY);
@@ -782,7 +477,7 @@ extern "C" void app_main(void)
     radio::Radio &r = radio::Radio::get();
     for (int tick = 1;; tick++) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        bool wifi = xEventGroupGetBits(g_events) & kWifiUp;
+        bool wifi = !wifi::ip().empty();
         if (g_role == "field" && !g_client && wifi) split_start();
         if (g_role == "app" && !g_server && g_remote && wifi) server_start();
         if (tick % 30) continue;
@@ -799,9 +494,9 @@ extern "C" void app_main(void)
         size_t d = r.direct.size(), rep = r.repeated.size(), n = r.nodes.size(), m = r.meaters.size();
         r.unlock();
         size_t ready = 0, total = 0;
-        for (auto &l : radio::Links::get().collect_states()) {
+        for (auto &l : g_radio.link_summaries()) {
             total++;
-            if (l == "ready") ready++;
+            if (l.state == "ready") ready++;
         }
         ESP_LOGI(TAG, "heard: %u probes, %u repeated, %u nodes, %u MEATERs (%u adverts); "
                       "links %u/%u ready; app unit %s%s; free heap %u",

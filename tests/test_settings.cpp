@@ -51,7 +51,7 @@ TEST_CASE("settings: apply_config validates, normalises and flags reboots")
     s.split_key = "secret";
     std::string err;
     bool reboot = true;
-    REQUIRE(apply(s, R"({"unit": "f", "linked_probes": ["10018f16"], "upstream_node": "G000001CA8",
+    REQUIRE(apply(s, R"({"unit": "f", "linked_probes": ["10018f16"], "upstream_node": ["G000001CA8"],
                          "nope": 3})", err, reboot));
     CHECK_FALSE(reboot);
     CHECK(s.unit == "f");

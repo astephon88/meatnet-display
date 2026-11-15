@@ -1,5 +1,5 @@
 // MeatNet link/unlink tables (messages 0x73-0x7B).
-// Stored as JSON (same format as the Python units' links.json); where it is
+// Stored as JSON; where it is
 // kept is up to the platform, through `saver`.
 #pragma once
 

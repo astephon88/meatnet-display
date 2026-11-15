@@ -1,7 +1,4 @@
 host/*.json
-# local settings of the retired MicroPython unit (may hold WiFi credentials)
-config.json
-links.json
 __pycache__/
 HANDOFF.md
 CLAUDE.md

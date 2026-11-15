@@ -5,13 +5,14 @@
 #include <cmath>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "doctest.h"
 #include "protocol.h"
-#include "transport.h"
+#include "radio_source.h"
 
 namespace testing {
 
@@ -82,7 +83,6 @@ inline Bytes status100(uint32_t session = 0x01020304, unsigned period = 1000)
 
 struct FakeLink : core::Link {
     std::string kind_, state_ = "idle";
-    bool enabled_ = true;
     std::vector<Bytes> written;
     std::map<std::string, std::vector<Bytes>> rx;
     std::map<std::string, std::string> info_;
@@ -90,7 +90,6 @@ struct FakeLink : core::Link {
     explicit FakeLink(std::string kind) : kind_(std::move(kind)) {}
     const std::string &kind() const override { return kind_; }
     const std::string &state() const override { return state_; }
-    bool enabled() const override { return enabled_; }
     int mtu() const override { return 185; }
     std::vector<Bytes> take(const std::string &sub) override
     {
@@ -129,7 +128,6 @@ struct FakeTransport : core::Transport {
     {
         auto &l = links[key];
         if (!l) l = std::make_shared<FakeLink>(kind);
-        static_cast<FakeLink &>(*l).enabled_ = true;
         return l;
     }
     void close_link(const Bytes &key) override { links.erase(key); }
@@ -150,6 +148,114 @@ struct FakeTransport : core::Transport {
         return out;
     }
     FakeLink &link(const Bytes &key) { return static_cast<FakeLink &>(*links.at(key)); }
+};
+
+// A unit's radio, backed by fake links; locked, as the split client reads it
+// from its own thread.
+struct FakeRadioSource : core::RadioSource {
+    std::mutex mu;
+    Tables t;
+    std::map<Bytes, std::shared_ptr<FakeLink>> links;
+    std::vector<Bytes> removed;
+    bool scan_active = false, standby = false;
+    Bytes ignore_mac;
+
+    template <class F> void with(F fn)
+    {
+        std::lock_guard<std::mutex> g(mu);
+        fn();
+    }
+    Tables tables() override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        return t;
+    }
+    void prune(int64_t now, int64_t max_age) override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        for (auto *tb : {&t.direct, &t.repeated, &t.nodes, &t.meaters})
+            for (auto it = tb->begin(); it != tb->end();)
+                it = now - it->second.ticks > max_age ? tb->erase(it) : std::next(it);
+    }
+    std::vector<core::LinkReport> collect_links() override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        std::vector<core::LinkReport> out;
+        for (auto &kv : links) {
+            core::LinkReport r;
+            r.key = kv.first;
+            r.kind = kv.second->kind();
+            r.state = kv.second->state();
+            r.mtu = kv.second->mtu();
+            r.info = kv.second->info_;
+            if (kv.second->ready())
+                for (const char *sub : {"status", "uart", "temp", "battery"})
+                    for (auto &d : kv.second->take(sub)) r.rx.push_back({sub, d});
+            out.push_back(r);
+        }
+        return out;
+    }
+    std::vector<core::LinkSummary> link_summaries() override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        std::vector<core::LinkSummary> out;
+        for (auto &kv : links)
+            out.push_back({kv.second->kind(), core::link_name(kv.first, kv.second->kind()), kv.second->state(), 0,
+                           kv.second->mtu(), ""});
+        return out;
+    }
+    std::vector<Bytes> take_removed_links() override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        return std::move(removed);
+    }
+    void open_link(const Bytes &key, const std::string &kind, int, const Bytes &) override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        auto &l = links[key];
+        if (!l) l = std::make_shared<FakeLink>(kind);
+    }
+    void close_link(const Bytes &key) override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        if (links.erase(key)) removed.push_back(key);
+    }
+    void write_link(const Bytes &key, const Bytes &data) override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        auto it = links.find(key);
+        if (it != links.end() && it->second->ready()) it->second->write(data);
+    }
+    void close_all_links() override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        for (auto &kv : links) removed.push_back(kv.first);
+        links.clear();
+    }
+    void set_scan_active(bool on) override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        scan_active = on;
+    }
+    void set_standby(bool on) override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        standby = on;
+    }
+    // As the radios do: forget what was collected from the app unit.
+    void set_ignore(const Bytes &mac, const Bytes &serial10) override
+    {
+        std::lock_guard<std::mutex> g(mu);
+        ignore_mac = mac;
+        if (!mac.empty()) {
+            for (auto *tb : {&t.direct, &t.nodes})
+                for (auto it = tb->begin(); it != tb->end();)
+                    it = it->second.addr == mac ? tb->erase(it) : std::next(it);
+            t.meaters.erase(mac);
+            t.repeated.clear();     // can't tell whose: refills within seconds
+        }
+        if (!serial10.empty()) t.nodes.erase(serial10);
+    }
 };
 
 }  // namespace testing

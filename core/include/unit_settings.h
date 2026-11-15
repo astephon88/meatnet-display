@@ -68,21 +68,20 @@ struct Settings {
     int battery_pin = 1;                // ADC pin of the battery divider, -1 = none
     double battery_divider = 3.0;       // V(bat) / V(pin): 200k/100k on the Waveshare
     Pins pins;
-    // C++ radio (firmware)
+    // ESP32 radio
     int supervision_probe_ms = 6000;
     int supervision_node_ms = 20000;
     int peer_latency_max = 0;
     std::string coex = "bt";            // "bt", "balance" or "wifi"
 };
 
-// Merges the keys present in `obj` (config.json format) into `s`, as
-// config.load does: unknown keys and values of the wrong type are ignored,
-// "pins" merges key by key, and a single upstream_node string (older
-// settings) becomes a list.
+// Merges the keys present in `obj` into `s`: unknown keys and values of the
+// wrong type are ignored, "pins" merges key by key, and a single
+// upstream_node string (older settings files) becomes a list.
 void merge_settings(Settings &s, const cJSON *obj);
 void merge_settings(Settings &s, const std::string &json);
 
-// All keys in config.json format. With `secrets` false, split_key,
+// All keys as JSON. With `secrets` false, split_key,
 // wifi_password and ap_password become "<name>_set": true/false.
 cJSON *settings_to_json(const Settings &s, bool secrets);
 

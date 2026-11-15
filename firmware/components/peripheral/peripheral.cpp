@@ -144,7 +144,14 @@ int Peripheral::gap_event(struct ble_gap_event *event, void *)
     return 0;
 }
 
-std::set<int> Peripheral::inbound()
+Bytes Peripheral::mac_address()
+{
+    uint8_t le[6] = {0};
+    ble_hs_id_copy_addr(BLE_ADDR_PUBLIC, le, nullptr);
+    return proto::addr_display(le);
+}
+
+std::set<int> Peripheral::connections()
 {
     std::lock_guard<std::mutex> g(mu_);
     return inbound_;
@@ -207,16 +214,16 @@ void Peripheral::set_standby(bool on)
     if (on) {
         ble_gap_adv_stop();
         txq_.clear();
-        for (int c : inbound()) ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
+        for (int c : connections()) ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
     } else {
         std::lock_guard<std::mutex> g(mu_);
         need_adv_ = true;
     }
 }
 
-// Advert data as the MicroPython unit built it: flags + manufacturer data; the
-// scan response carries the DFU service the apps filter on, plus our name
-// (or, for a direct-probe advert, the Probe Status service, like a real probe).
+// Advert data: flags + manufacturer data; the scan response carries the DFU
+// service the apps filter on, plus our name (or, for a direct-probe advert,
+// the Probe Status service, like a real probe).
 void Peripheral::advertise()
 {
     if (standby_ || adverts_.empty()) {
@@ -233,7 +240,7 @@ void Peripheral::advertise()
         rsp = Bytes("\x11\x07", 2) + protocol::DFU_SERVICE_UUID_LE + static_cast<char>(name.size() + 1) +
               '\x09' + name;
     }
-    size_t in_use = inbound().size() + (outbound_ ? outbound_() : 0);
+    size_t in_use = connections().size() + (outbound_ ? outbound_() : 0);
     bool connectable = !a.probe && in_use < static_cast<size_t>(max_conn_);   // never a fake probe
     ble_gap_adv_stop();
     ble_gap_adv_set_data(reinterpret_cast<const uint8_t *>(adv.data()), adv.size());

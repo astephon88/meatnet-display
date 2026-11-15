@@ -235,7 +235,7 @@ void Peripheral::send(const Bytes &frame, const std::vector<int> &conns)
     txq_.push_back(frame);
 }
 
-void Peripheral::set_advertising(const std::vector<core::Transport::Advert> &adverts)
+void Peripheral::set_advertising(const std::vector<core::Transport::Advert> &adverts, bool)
 {
     if (adverts == adverts_) return;
     adverts_ = adverts;

@@ -16,10 +16,7 @@
 #include <atomic>
 #include <cstdio>
 #include <ctime>
-#include <filesystem>
-#include <fstream>
 #include <mutex>
-#include <sstream>
 #include <thread>
 
 #include "cJSON.h"
@@ -29,10 +26,9 @@
 #include "log_ring.h"
 #include "node.h"
 #include "peripheral.h"
+#include "settings_file.h"
 #include "split.h"
 #include "status.h"
-#include "host_transport.h"
-#include "unit_settings.h"
 #include "util.h"
 
 extern const char index_html[];
@@ -54,27 +50,6 @@ void log(const std::string &msg)
     g_logring.push(msg);
 }
 
-std::string read_file(const std::string &path)
-{
-    std::ifstream f(path);
-    std::stringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-}
-
-bool write_file(const std::string &path, const std::string &text)
-{
-    std::error_code ec;
-    std::filesystem::path dir = std::filesystem::path(path).parent_path();
-    if (!dir.empty()) std::filesystem::create_directories(dir, ec);     // e.g. host/ in a fresh clone
-    std::string tmp = path + ".tmp";
-    {
-        std::ofstream f(tmp);
-        if (!(f << text)) return false;
-    }
-    return rename(tmp.c_str(), path.c_str()) == 0;
-}
-
 std::string json_text(cJSON *o)
 {
     char *t = cJSON_PrintUnformatted(o);
@@ -83,54 +58,6 @@ std::string json_text(cJSON *o)
     cJSON_Delete(o);
     return s;
 }
-
-// The settings file (host/app.json format: config.json's keys), loaded at
-// start and rewritten on every change from the web page.
-class SettingsFile {
-public:
-    explicit SettingsFile(std::string path) : path_(std::move(path)) { core::merge_settings(s_, read_file(path_)); }
-    core::Settings get()
-    {
-        std::lock_guard<std::mutex> g(mu_);
-        return s_;
-    }
-    // Command-line overrides: in effect, but not written to the file.
-    void override(const std::string &role, const std::optional<std::string> &peer,
-                  const std::optional<std::string> &key)
-    {
-        std::lock_guard<std::mutex> g(mu_);
-        role_ = role;
-        peer_ = peer;
-        key_ = key;
-        apply_overrides(s_);
-    }
-    bool update(const cJSON *req, std::string &err, bool &reboot)
-    {
-        std::lock_guard<std::mutex> g(mu_);
-        core::Settings saved;
-        core::merge_settings(saved, read_file(path_));
-        if (!core::apply_config(saved, req, err, reboot)) return false;
-        if (!write_file(path_, json_text(core::settings_to_json(saved, true)))) {
-            err = "could not write " + path_;
-            return false;
-        }
-        s_ = saved;
-        apply_overrides(s_);
-        return true;
-    }
-
-private:
-    void apply_overrides(core::Settings &s)
-    {
-        s.role = role_;
-        if (peer_) s.split_peer = *peer_;
-        if (key_) s.split_key = *key_;
-    }
-    std::string path_, role_;
-    std::optional<std::string> peer_, key_;
-    std::mutex mu_;
-    core::Settings s_;
-};
 
 std::string machine_id_serial(char role)
 {
@@ -205,6 +132,80 @@ std::atomic<bool> g_cfg_changed{false};
 std::string g_exe;                      // our binary (re-exec'd by "Reboot"); keeps the process name
 char **g_argv;
 
+// The web page and its API.
+struct WebContext {
+    std::string role, serial, ip;
+    int64_t started;
+    SettingsFile &settings;
+};
+
+Response handle(const WebContext &c, const Request &r)
+{
+    Response res;
+    auto result = [](bool ok, const std::string &error, const char *flag = nullptr) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddBoolToObject(o, "ok", ok);
+        if (!ok) cJSON_AddStringToObject(o, "error", error.c_str());
+        if (flag) cJSON_AddBoolToObject(o, flag, true);
+        return json_text(o);
+    };
+    if (r.path == "/") {
+        res.type = "text/html";
+        res.body.assign(index_html, index_html_len);
+    } else if (r.path == "/api/state") {
+        std::string snap;
+        {
+            std::lock_guard<std::mutex> g(g_snap_mu);
+            snap = g_snap;
+        }
+        cJSON *o = cJSON_Parse(snap.c_str());
+        if (!o) o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "serial", c.serial.c_str());
+        cJSON_DeleteItemFromObject(o, "role");
+        cJSON_AddStringToObject(o, "role", c.role.c_str());
+        cJSON *w = cJSON_AddObjectToObject(o, "wifi");
+        cJSON_AddStringToObject(w, "mode", "sta");
+        cJSON_AddStringToObject(w, "ip", c.ip.c_str());
+        cJSON_AddStringToObject(w, "ssid", "");
+        cJSON_AddStringToObject(w, "ap_ssid", "");
+        cJSON_AddNumberToObject(o, "heap", 0);
+        cJSON_AddNumberToObject(o, "uptime", static_cast<double>((core::ticks_ms() - c.started) / 1000));
+        cJSON_AddStringToObject(o, "display", "none (host)");
+        cJSON_AddNullToObject(o, "power");
+        res.body = json_text(o);
+    } else if (r.path == "/api/config" && r.method == "GET") {
+        res.body = json_text(core::settings_to_json(c.settings.get(), false));
+    } else if (r.path == "/api/config" && r.method == "POST") {
+        cJSON *req = cJSON_Parse(r.body.c_str());
+        std::string error;
+        bool reboot = false;
+        bool ok = req && c.settings.update(req, error, reboot);
+        if (!req) error = "expected a JSON object";
+        cJSON_Delete(req);
+        if (ok) g_cfg_changed = true;
+        res.body = result(ok, error, ok && reboot ? "reboot" : nullptr);
+    } else if (r.path == "/api/wifi/scan") {
+        res.body = R"({"ok":true,"networks":[]})";
+    } else if (r.path == "/api/wifi") {
+        res.body = result(false, "this host's network is set up outside MeatNet");
+    } else if (r.path == "/api/power") {
+        res.body = result(false, "power management unavailable");
+    } else if (r.path == "/api/log") {
+        res.body = json_text(g_logring.since(static_cast<uint32_t>(strtoul(query_value(r.query, "since").c_str(), nullptr, 10))));
+    } else if (r.path == "/api/reboot" && r.method == "POST") {
+        res.body = result(true, "");
+        // "Reboot": start this process again with the same arguments, once the reply is out.
+        std::thread([] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            execv(g_exe.c_str(), g_argv);
+        }).detach();
+    } else {
+        res.status = 302;
+        res.type = "text/plain";
+    }
+    return res;
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
@@ -239,7 +240,7 @@ int main(int argc, char **argv)
 
     std::unique_ptr<Peripheral> periph;
     std::unique_ptr<Central> central;
-    std::unique_ptr<LinuxTransport> local;
+    std::unique_ptr<core::LocalTransport> local;
     std::unique_ptr<split::RemoteRadio> remote;
     std::unique_ptr<split::SplitServer> server;
     std::unique_ptr<split::FieldRadio> fradio;
@@ -258,7 +259,7 @@ int main(int argc, char **argv)
     if (opt.role != "field") {
         periph = std::make_unique<Peripheral>(bus, adapter, serial, cfg.dis_model, cfg.dis_firmware, log);
         periph->start();
-        local = std::make_unique<LinuxTransport>(*periph, central.get());
+        local = std::make_unique<core::LocalTransport>(*periph, central.get());
         local->max_conn = cfg.max_conn;
         core::Transport *t = local.get();
         if (opt.role == "app") {
@@ -274,7 +275,7 @@ int main(int argc, char **argv)
         }
         node = std::make_unique<core::Node>(*t, cfg, serial, log, &links);
     } else {
-        fradio = std::make_unique<split::FieldRadio>(*central, log);
+        fradio = std::make_unique<split::FieldRadio>(*central);
         split::ClientConfig cc;
         cc.peer = cfg.split_peer;
         cc.key = cfg.split_key;
@@ -282,7 +283,6 @@ int main(int argc, char **argv)
         cc.serial = serial;
         cc.max_conn = cfg.max_conn;
         cc.mac = central->mac;
-        cc.impl = "linux";
         client = std::make_unique<split::SplitClient>(*fradio, cc, log);
         threads.emplace_back([&client] { client->run(); });
     }
@@ -313,26 +313,14 @@ int main(int argc, char **argv)
             o = core::field_status(t.direct, t.nodes, t.meaters, central->link_summaries(), cfg.max_conn,
                                    core::ticks_ms());
         }
-        cJSON *sp = cJSON_AddObjectToObject(o, "split");
-        if (remote) {
-            cJSON_AddBoolToObject(sp, "connected", remote->connected);
-            if (remote->connected) {
-                cJSON_AddStringToObject(sp, "peer", remote->peer_serial.c_str());
-                cJSON_AddStringToObject(sp, "ip", remote->peer_ip.c_str());
-                cJSON_AddNumberToObject(sp, "rtt_ms", remote->rtt_ms);
-                cJSON_AddNumberToObject(sp, "max_conn", remote->max_conn);
-            }
-        } else if (client) {
-            cJSON_AddBoolToObject(sp, "connected", client->connected());
-            if (client->connected()) {
-                cJSON_AddStringToObject(sp, "peer", client->peer().c_str());
-                cJSON_AddStringToObject(sp, "ip", client->peer_ip().c_str());
-                cJSON_AddNumberToObject(sp, "rtt_ms", client->rtt_ms());
-            }
-        } else {
-            cJSON_DeleteItemFromObject(o, "split");
+        if (remote)
+            cJSON_AddItemToObject(o, "split", core::split_status(remote->connected, remote->peer_serial, remote->peer_ip,
+                                                                 remote->rtt_ms, remote->max_conn));
+        else if (client)
+            cJSON_AddItemToObject(o, "split", core::split_status(client->connected(), client->peer(), client->peer_ip(),
+                                                                 client->rtt_ms()));
+        else
             cJSON_AddNullToObject(o, "split");
-        }
         std::lock_guard<std::mutex> g(g_snap_mu);
         g_snap = json_text(o);
     };
@@ -357,71 +345,8 @@ int main(int argc, char **argv)
         },
         nullptr, nullptr);
 
-    HttpServer web(opt.web_port, [&](const Request &r) -> Response {
-        Response res;
-        auto result = [](bool ok, const std::string &error, const char *flag = nullptr) {
-            cJSON *o = cJSON_CreateObject();
-            cJSON_AddBoolToObject(o, "ok", ok);
-            if (!ok) cJSON_AddStringToObject(o, "error", error.c_str());
-            if (flag) cJSON_AddBoolToObject(o, flag, true);
-            return json_text(o);
-        };
-        if (r.path == "/") {
-            res.type = "text/html";
-            res.body.assign(index_html, index_html_len);
-        } else if (r.path == "/api/state") {
-            std::string snap;
-            {
-                std::lock_guard<std::mutex> g(g_snap_mu);
-                snap = g_snap;
-            }
-            cJSON *o = cJSON_Parse(snap.c_str());
-            if (!o) o = cJSON_CreateObject();
-            cJSON_AddStringToObject(o, "serial", serial.c_str());
-            cJSON_DeleteItemFromObject(o, "role");
-            cJSON_AddStringToObject(o, "role", opt.role.c_str());
-            cJSON *w = cJSON_AddObjectToObject(o, "wifi");
-            cJSON_AddStringToObject(w, "mode", "sta");
-            cJSON_AddStringToObject(w, "ip", ip.c_str());
-            cJSON_AddStringToObject(w, "ssid", "");
-            cJSON_AddStringToObject(w, "ap_ssid", "");
-            cJSON_AddNumberToObject(o, "heap", 0);
-            cJSON_AddNumberToObject(o, "uptime", static_cast<double>((core::ticks_ms() - started) / 1000));
-            cJSON_AddStringToObject(o, "display", "none (host)");
-            cJSON_AddNullToObject(o, "power");
-            res.body = json_text(o);
-        } else if (r.path == "/api/config" && r.method == "GET") {
-            res.body = json_text(core::settings_to_json(settings.get(), false));
-        } else if (r.path == "/api/config" && r.method == "POST") {
-            cJSON *req = cJSON_Parse(r.body.c_str());
-            std::string error;
-            bool reboot = false;
-            bool ok = req && settings.update(req, error, reboot);
-            if (!req) error = "expected a JSON object";
-            cJSON_Delete(req);
-            if (ok) g_cfg_changed = true;
-            res.body = result(ok, error, ok && reboot ? "reboot" : nullptr);
-        } else if (r.path == "/api/wifi/scan") {
-            res.body = R"({"ok":true,"networks":[]})";
-        } else if (r.path == "/api/wifi") {
-            res.body = result(false, "this host's network is set up outside MeatNet");
-        } else if (r.path == "/api/power") {
-            res.body = result(false, "power management unavailable");
-        } else if (r.path == "/api/log") {
-            res.body = json_text(g_logring.since(static_cast<uint32_t>(strtoul(query_value(r.query, "since").c_str(), nullptr, 10))));
-        } else if (r.path == "/api/reboot" && r.method == "POST") {
-            res.body = result(true, "");
-            // "Reboot": start this process again with the same arguments, once the reply is out.
-            std::thread([] {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                execv(g_exe.c_str(), g_argv);
-            }).detach();
-        } else {
-            res.status = 302;
-            res.type = "text/plain";
-        }
-        return res;
-    });
+    WebContext wc{opt.role, serial, ip, started, settings};
+    HttpServer web(opt.web_port, [&wc](const Request &r) { return handle(wc, r); });
     if (!web.listen()) {
         log("[host] web UI: port " + std::to_string(opt.web_port) + " is in use");
         return 1;

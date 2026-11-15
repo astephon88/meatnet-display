@@ -61,7 +61,7 @@ static void put32(Bytes &b, uint32_t v)
 
 static Bytes byte(int v) { return Bytes(1, static_cast<char>(v & 0xFF)); }
 
-static Bytes sub(const Bytes &b, size_t from, size_t to)   // Python b[from:to]
+static Bytes sub(const Bytes &b, size_t from, size_t to)   // b[from, to)
 {
     if (from >= b.size()) return Bytes();
     return b.substr(from, std::min(to, b.size()) - from);
@@ -74,7 +74,7 @@ static Bytes pad(const Bytes &b, size_t n)
     return out;
 }
 
-// Little-endian bit field from a byte string (Python int.from_bytes + shift).
+// Little-endian bit field from a byte string.
 static uint64_t bits(const Bytes &b, unsigned shift, unsigned width)
 {
     uint64_t v = 0;

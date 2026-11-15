@@ -123,7 +123,7 @@ void Radio::prune(int64_t now_ms, int64_t max_age_ms)
     lock();
     for (Table *t : {&direct, &repeated, &nodes, &meaters}) {
         for (auto it = t->begin(); it != t->end();) {
-            if (now_ms - it->second.ms > max_age_ms)
+            if (now_ms - it->second.ticks > max_age_ms)
                 it = t->erase(it);
             else
                 ++it;
@@ -165,19 +165,19 @@ void Radio::ingest(const struct ble_gap_disc_desc &d)
         lock();
         adverts_++;
         if (ptype == proto::kProductProbe && body.size() >= 20) {
-            Sighting &s = direct[body.substr(1, 4)];
-            s.body = body; s.ms = now; s.addr_type = d.addr.type; s.addr = addr; s.rssi = d.rssi;
+            core::Observation &s = direct[body.substr(1, 4)];
+            s.body = body; s.ticks = now; s.addr_type = d.addr.type; s.addr = addr; s.rssi = d.rssi;
         } else if (ptype == proto::kProductRepeated && body.size() >= 20) {
             std::string serial = body.substr(1, 4);
             if (serial != std::string(4, '\0')) {
-                Sighting &s = repeated[serial];
-                s.body = body; s.ms = now; s.rssi = d.rssi;
+                core::Observation &s = repeated[serial];
+                s.body = body; s.ticks = now; s.rssi = d.rssi;
             }
         } else if (ptype >= proto::kProductGauge && body.size() >= 11) {
             std::string serial = body.substr(1, 10);
             if (serial != ignore_serial_) {
-                Sighting &s = nodes[serial];
-                s.body = body; s.ms = now; s.addr_type = d.addr.type; s.addr = addr; s.rssi = d.rssi;
+                core::Observation &s = nodes[serial];
+                s.body = body; s.ticks = now; s.addr_type = d.addr.type; s.addr = addr; s.rssi = d.rssi;
             }
         }
         unlock();
@@ -191,9 +191,9 @@ void Radio::ingest(const struct ble_gap_disc_desc &d)
     if (!uuid_hit && !name_hit) return;
     lock();
     adverts_++;
-    Sighting &s = meaters[addr];
+    core::Observation &s = meaters[addr];
     if (f.name && f.name_len) s.name.assign(reinterpret_cast<const char *>(f.name), f.name_len);
-    s.ms = now; s.addr_type = d.addr.type; s.addr = addr; s.rssi = d.rssi;
+    s.ticks = now; s.addr_type = d.addr.type; s.addr = addr; s.rssi = d.rssi;
     unlock();
 }
 

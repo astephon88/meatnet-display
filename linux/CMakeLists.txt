@@ -9,6 +9,6 @@ add_custom_command(OUTPUT ${PAGE_CPP}
                    COMMAND ${CMAKE_COMMAND} -DIN=${PAGE} -DOUT=${PAGE_CPP} -P ${CMAKE_CURRENT_SOURCE_DIR}/embed.cmake
                    DEPENDS ${PAGE} ${CMAKE_CURRENT_SOURCE_DIR}/embed.cmake)
 
-add_executable(meatnet main.cpp central.cpp gdbus_util.cpp http.cpp peripheral.cpp host_transport.cpp ${PAGE_CPP})
+add_executable(meatnet main.cpp central.cpp gdbus_util.cpp http.cpp peripheral.cpp ${PAGE_CPP})
 target_link_libraries(meatnet meatnet_core PkgConfig::GIO pthread)
 target_compile_options(meatnet PRIVATE -Wall -Wextra)

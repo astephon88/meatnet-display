@@ -23,7 +23,7 @@ int battery_percent(double v)
 }
 
 PowerManager::PowerManager(Settings &cfg, Transport &t, Node &node, Hooks hooks,
-                           std::function<void(const std::string &)> log, int64_t now)
+                           LogFn log, int64_t now)
     : since(now), last_probe(now), cfg_(cfg), t_(t), node_(node), hooks_(std::move(hooks)), log_(std::move(log))
 {
     if (cfg_.standby) enter("manual", now, false);

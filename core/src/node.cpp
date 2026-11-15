@@ -1,7 +1,6 @@
 #include "node.h"
 
 #include <algorithm>
-#include <cstdarg>
 #include <cstdio>
 #include <set>
 
@@ -47,17 +46,6 @@ Node::Node(Transport &t_, Settings &cfg_, std::string serial_, LogFn log_, LinkT
     stats = {{"rx", 0}, {"tx", 0}, {"routed", 0}, {"status_sent", 0}};
     via = {{"app_to_node", {}}, {"node_to_app", {}}};
     now_ = ticks_ms();
-}
-
-void Node::logf(const char *fmt, ...)
-{
-    if (!log) return;
-    char buf[256];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    log(buf);
 }
 
 // -- config helpers ----------------------------------------------------------------------
@@ -117,16 +105,30 @@ Link *Node::probe_link(const Bytes &serial4)
     return nullptr;
 }
 
-void Node::count_via(const std::string &direction, const Bytes &frame, const Bytes &key)
+// The last sighting of a link's device, if it is still in its scan table.
+const Observation *Node::heard(const Bytes &key, const std::string &kind) const
 {
-    auto &d = via[direction];
+    const auto &table = kind == "probe" ? t.direct : kind == "meater" ? t.meaters : t.nodes;
+    auto obs = table.find(key);
+    return obs != table.end() ? &obs->second : nullptr;
+}
+
+int Node::link_rssi(const Bytes &key, const std::string &kind) const
+{
+    const Observation *obs = heard(key, kind);
+    return obs ? obs->rssi : 0;
+}
+
+void Node::count_via(bool to_node, const Bytes &frame, const Bytes &key)
+{
+    auto &d = via[to_node ? "app_to_node" : "node_to_app"];
     uint8_t mt = frame[4];
     char name[16];
     snprintf(name, sizeof(name), "0x%02x%s", mt & 0x7F, (mt & 0x80) ? " rsp" : "");
     bool first = !d.count(name);
     d[name]++;
-    if (first && direction == "app_to_node")
-        logf("[route] app reached %s through the Display (0x%s)",
+    if (first && to_node)
+        logf(log, "[route] app reached %s through the Display (0x%s)",
              key.empty() ? "a node" : protocol::serial10_str(key).c_str(), name + 2);
 }
 
@@ -151,17 +153,24 @@ void Node::flood(const Bytes &frame, const std::optional<Port> &origin, bool inb
             if (!origin || *origin != Port::inbound(c)) targets.push_back(c);
         if (!targets.empty()) {
             t.send(frame, targets);
-            if (origin && !origin->in) count_via("node_to_app", frame);
+            if (origin && !origin->in) count_via(false, frame);
         }
     }
     if (to_links) {
         for (auto &kl : node_links()) {
             if (!origin || *origin != Port::link(kl.first)) {
                 kl.second->write(frame);
-                if (origin && origin->in) count_via("app_to_node", frame, kl.first);
+                if (origin && origin->in) count_via(true, frame, kl.first);
             }
         }
     }
+}
+
+// A message of our own: never handle it again when it comes back round.
+void Node::flood_own(const Bytes &frame)
+{
+    ids.seen(rid_of(frame));
+    flood(frame);
 }
 
 // -- periodic work -----------------------------------------------------------------------------
@@ -232,7 +241,7 @@ void Node::service_link(const Bytes &key, Link &link, int64_t now)
     if (prev_it == link_state.end() || prev_it->second != state) {
         std::string prev = prev_it == link_state.end() ? "" : prev_it->second;
         link_state[key] = state;
-        logf("[link] %s %s: %s", link.kind().c_str(), link_name(key, link).c_str(), state.c_str());
+        logf(log, "[link] %s %s: %s", link.kind().c_str(), link_name(key, link).c_str(), state.c_str());
         if (link.kind() == "meater" && peer_features() && (state == "ready" || prev == "ready"))
             flood(protocol::build_device_connected(state == "ready", protocol::PRODUCT_TYPE_PROBE,
                                                    meater::serial_for(key)));
@@ -266,9 +275,7 @@ void Node::service_link(const Bytes &key, Link &link, int64_t now)
             if (status.size() >= 48) {
                 link_status[key] = {status, now};
                 assign_slot(key);
-                Bytes frame = protocol::build_node_probe_status(key, status, 1);
-                ids.seen(rid_of(frame));
-                flood(frame);
+                flood_own(protocol::build_node_probe_status(key, status, 1));
                 stats["status_sent"]++;
             }
         }
@@ -297,9 +304,7 @@ void Node::service_link(const Bytes &key, Link &link, int64_t now)
 
 std::string Node::link_name(const Bytes &key, const Link &link)
 {
-    if (link.kind() == "probe") return protocol::probe_serial_str(key);
-    if (link.kind() == "meater") return meater::addr_str(key);
-    return protocol::serial10_str(key);
+    return core::link_name(key, link.kind());
 }
 
 // -- bridged MEATERs ---------------------------------------------------------------------------
@@ -327,19 +332,25 @@ std::optional<MeaterReading> Node::meater_reading(const Bytes &addr, int64_t now
     return r;
 }
 
+// A MEATER's bridge settings (the defaults if it isn't selected).
+MeaterProbe Node::meater_config(const Bytes &addr) const
+{
+    auto sel = meater_selected();
+    auto it = sel.find(addr);
+    return it != sel.end() ? it->second : MeaterProbe();
+}
+
 meater::Fields Node::meater_fields(const Bytes &addr)
 {
     const MeaterData &d = meater_data[addr];
-    auto sel = meater_selected();
-    MeaterProbe e = sel.count(addr) ? sel[addr] : MeaterProbe();
+    MeaterProbe e = meater_config(addr);
     return meater::encode_fields(meater::map_sensors(*d.temps), e.id, e.color, low_battery(d));
 }
 
 Bytes Node::meater_direct(const Bytes &addr)
 {
     const MeaterData &d = meater_data[addr];
-    auto sel = meater_selected();
-    MeaterProbe e = sel.count(addr) ? sel[addr] : MeaterProbe();
+    MeaterProbe e = meater_config(addr);
     return meater::build_direct_advert(meater::serial_for(addr), meater::map_sensors(*d.temps), e.id,
                                        e.color, low_battery(d));
 }
@@ -374,9 +385,7 @@ void Node::meater_update(const Bytes &addr, int64_t now)
     sess.status = meater::build_status(fields, sess.base, log_max, sess.session, MEATER_SAMPLE_MS);
     sess.at = now;
     assign_slot(sess.serial);
-    Bytes frame = protocol::build_node_probe_status(sess.serial, sess.status, 1);
-    ids.seen(rid_of(frame));
-    flood(frame);
+    flood_own(protocol::build_node_probe_status(sess.serial, sess.status, 1));
     stats["status_sent"]++;
 }
 
@@ -482,10 +491,8 @@ void Node::meater_link(const Bytes &serial4)
     if (!links_table) return;
     protocol::LinkEntry entry{protocol::PRODUCT_TYPE_PROBE, serial4, unix_time(), false};
     if (links_table->link(entry)) {
-        Bytes note = protocol::build_link_notification(true, entry);
-        ids.seen(rid_of(note));
-        flood(note);
-        logf("[meater] %s linked to MeatNet", protocol::probe_serial_str(serial4).c_str());
+        flood_own(protocol::build_link_notification(true, entry));
+        logf(log, "[meater] %s linked to MeatNet", protocol::probe_serial_str(serial4).c_str());
     }
 }
 
@@ -677,8 +684,7 @@ void Node::manage_links(int64_t now)
     // Probes and MEATERs share the outbound budget.
     std::vector<Bytes> active;
     for (auto &kv : t.links)
-        if ((kv.second->kind() == "probe" || kv.second->kind() == "meater") && kv.second->enabled())
-            active.push_back(kv.first);
+        if (kv.second->kind() == "probe" || kv.second->kind() == "meater") active.push_back(kv.first);
     for (auto &s : wanted) {
         if (contains(active, s)) continue;
         if (static_cast<int>(active.size()) >= budget) break;
@@ -722,13 +728,11 @@ void Node::give_up_silent_links(int64_t now)
         }
         int64_t since = link_down_since.emplace(kv.first, now).first->second;
         if (now - since < LINK_GIVE_UP_MS) continue;
-        const auto &table = l.kind() == "probe" ? t.direct : l.kind() == "meater" ? t.meaters : t.nodes;
-        auto obs = table.find(kv.first);
-        if (obs == table.end() || now - obs->second.ticks >= LINK_GIVE_UP_MS)
-            quiet.push_back({kv.first, l.kind()});
+        const Observation *obs = heard(kv.first, l.kind());
+        if (!obs || now - obs->ticks >= LINK_GIVE_UP_MS) quiet.push_back({kv.first, l.kind()});
     }
     for (auto &q : quiet) {
-        logf("[link] %s %s: not heard for %ds, stopped until it advertises again", q.second.c_str(),
+        logf(log, "[link] %s %s: not heard for %ds, stopped until it advertises again", q.second.c_str(),
              link_name(q.first, *t.links[q.first]).c_str(), static_cast<int>(LINK_GIVE_UP_MS / 1000));
         t.close_link(q.first);
         link_down_since.erase(q.first);
@@ -746,7 +750,7 @@ void Node::on_node_link_ready(const Bytes &key)
     Bytes frame = protocol::build_request(protocol::MSG_ASSOCIATE_NODE, Bytes());
     uint32_t rid = rid_of(frame);
     ids.seen(rid);
-    my_reqs[rid] = {"assoc", port, 0, 0, now_};
+    my_reqs[rid] = {MyReq::ASSOC, port, 0, 0, now_};
     send(port, frame);
     // Its link table rarely changes; don't re-pull it on every reconnect.
     auto last = table_pulled.find(key);
@@ -816,7 +820,7 @@ void Node::expire(int64_t now)
         } else if (age > (log_read_active(p.probe) ? BUSY_TIMEOUT_MS : PENDING_TIMEOUT_MS)) {
             if (p.type != protocol::MSG_SILENCE_ALARMS)
                 send(p.port, protocol::build_response(p.type, p.req, false, Bytes()));
-            logf("[route] 0x%02x to %s timed out", p.type, protocol::probe_serial_str(p.probe).c_str());
+            logf(log, "[route] 0x%02x to %s timed out", p.type, protocol::probe_serial_str(p.probe).c_str());
             continue;
         }
         keep.push_back(p);
@@ -875,7 +879,7 @@ void Node::on_frame(const Port &port, const Frame &f, int64_t now)
             meater_device_info(port, f, *addr);
         } else if (probe_device_info(port, f)) {
         } else if (!forward_to_owner(port, f, serial4, now)) {
-            logf("[route] 0x%02x for %s: no answer available", mt, probe_serial_str(serial4).c_str());
+            logf(log, "[route] 0x%02x for %s: no answer available", mt, probe_serial_str(serial4).c_str());
         }
     } else {
         // Gauge/Engine status, device connected/disconnected, requests for
@@ -899,7 +903,7 @@ void Node::on_response(const Port &port, const Frame &f, int64_t now)
     if (fw != fwd.end()) {
         Port to = fw->second.first;
         send(to, f.raw);
-        if (!port.in && to.in) count_via("node_to_app", f.raw);
+        if (!port.in && to.in) count_via(false, f.raw);
         // Log reads (probe 0x04, gauge 0x62) answer with many responses:
         // keep the route open until it goes quiet (FWD_TIMEOUT_MS).
         fw->second.second = now;
@@ -916,7 +920,7 @@ bool Node::forward_to_owner(const Port &port, const Frame &f, const Bytes &seria
     Port to = via->second.port;
     fwd[f.request_id] = {port, now};
     send(to, f.raw);
-    if (port.in && !to.in) count_via("app_to_node", f.raw, to.key);
+    if (port.in && !to.in) count_via(true, f.raw, to.key);
     stats["routed"]++;
     return true;
 }
@@ -931,12 +935,7 @@ void Node::route_probe_request(const Port &port, const Frame &f, int64_t now)
         return;
     }
     if (Link *link = probe_link(serial4)) {
-        Pending p;
-        p.probe = serial4;
-        p.type = f.msg_type;
-        p.req = f.request_id;
-        p.port = port;
-        p.at = now;
+        Pending p{serial4, f.msg_type, f.request_id, port, now};
         if (f.msg_type == protocol::MSG_READ_LOGS && probe_payload.size() >= 8) {
             p.range = true;
             p.start = u32(probe_payload, 0);
@@ -958,7 +957,7 @@ void Node::route_probe_request(const Port &port, const Frame &f, int64_t now)
         return;
     }
     if (!forward_to_owner(port, f, serial4, now))
-        logf("[route] 0x%02x for %s: probe not in network", f.msg_type,
+        logf(log, "[route] 0x%02x for %s: probe not in network", f.msg_type,
              protocol::probe_serial_str(serial4).c_str());
 }
 
@@ -1029,7 +1028,7 @@ void Node::stray(const Bytes &serial4, uint8_t mtype, int64_t now, const std::st
     int n = ++stats["stray"];
     if (!stray_at_ || now - *stray_at_ >= STRAY_LOG_MS) {
         stray_at_ = now;
-        logf("[route] %s response 0x%02x%s with no request waiting (%d so far)",
+        logf(log, "[route] %s response 0x%02x%s with no request waiting (%d so far)",
              protocol::probe_serial_str(serial4).c_str(), mtype,
              what.empty() ? "" : (" (" + what + ")").c_str(), n);
     }
@@ -1050,13 +1049,7 @@ void Node::on_silence(const Port &port, const Frame &f, int64_t now)
             forward_to_owner(port, f, s.serial4, now);
     }
     for (auto &probe : targets) {
-        Pending p;
-        p.probe = probe;
-        p.type = protocol::MSG_SILENCE_ALARMS;
-        p.req = f.request_id;
-        p.port = port;
-        p.at = now;
-        pending.push_back(p);
+        pending.push_back({probe, protocol::MSG_SILENCE_ALARMS, f.request_id, port, now});
         probe_link(probe)->write(protocol::build_probe_request(protocol::MSG_SILENCE_ALARMS));
     }
     if (s.global ||
@@ -1096,17 +1089,10 @@ void Node::on_topology(const Port &port, const Frame &f, int64_t now)
     for (auto &kl : links) {
         Link &link = *kl.second;
         if (!link.ready()) continue;
-        if (link.kind() == "probe") {
-            auto obs = t.direct.find(kl.first);
-            out.push_back({assign_slot(kl.first).value_or(0), obs != t.direct.end() ? obs->second.rssi : 0});
-        } else if (link.kind() == "meater") {
-            auto obs = t.meaters.find(kl.first);
-            out.push_back({assign_slot(meater::serial_for(kl.first)).value_or(0),
-                           obs != t.meaters.end() ? obs->second.rssi : 0});
-        } else if (link.kind() == "node") {
-            auto obs = t.nodes.find(kl.first);
-            out.push_back({node_number(kl.first), obs != t.nodes.end() ? obs->second.rssi : 0});
-        }
+        int number = link.kind() == "probe" ? assign_slot(kl.first).value_or(0)
+                   : link.kind() == "meater" ? assign_slot(meater::serial_for(kl.first)).value_or(0)
+                                             : node_number(kl.first);
+        out.push_back({number, link_rssi(kl.first, link.kind())});
     }
     send(port, protocol::build_topology_response(f.request_id, 20, protocol::PRODUCT_TYPE_DISPLAY, serial,
                                                  in, out));
@@ -1152,26 +1138,20 @@ void Node::send_heartbeat()
         for (auto &kv : t.links) {
             Link &link = *kv.second;
             if (!link.ready()) continue;
+            int rssi = link_rssi(kv.first, link.kind());
             if (link.kind() == "probe") {
-                auto obs = t.direct.find(kv.first);
-                records.push_back({protocol::PRODUCT_TYPE_PROBE, kv.first,
-                                   obs != t.direct.end() ? obs->second.rssi : 0});
+                records.push_back({protocol::PRODUCT_TYPE_PROBE, kv.first, rssi});
             } else if (link.kind() == "meater") {
-                auto obs = t.meaters.find(kv.first);
-                records.push_back({protocol::PRODUCT_TYPE_PROBE, meater::serial_for(kv.first),
-                                   obs != t.meaters.end() ? obs->second.rssi : 0});
-            } else if (link.kind() == "node") {
+                records.push_back({protocol::PRODUCT_TYPE_PROBE, meater::serial_for(kv.first), rssi});
+            } else {
                 auto d = devices.find(kv.first);
                 records.push_back({d != devices.end() ? d->second.ptype : protocol::PRODUCT_TYPE_DISPLAY,
-                                   kv.first, d != devices.end() ? d->second.rssi : 0});
+                                   kv.first, rssi});
             }
         }
     }
     if (records.size() > 4) records.resize(4);
-    Bytes frame = protocol::build_heartbeat(serial, t.mac, protocol::PRODUCT_TYPE_DISPLAY, hb_inbound_,
-                                            records);
-    ids.seen(rid_of(frame));
-    flood(frame);
+    flood_own(protocol::build_heartbeat(serial, t.mac, protocol::PRODUCT_TYPE_DISPLAY, hb_inbound_, records));
 }
 
 void Node::on_sync_list(const Frame &f)
@@ -1196,20 +1176,20 @@ void Node::request_link_table(const Port &port, uint8_t msg_type, int page)
     Bytes frame = protocol::build_request(msg_type, Bytes(1, static_cast<char>(page)));
     uint32_t rid = rid_of(frame);
     ids.seen(rid);
-    my_reqs[rid] = {"table", port, msg_type, page, now_};
+    my_reqs[rid] = {MyReq::TABLE, port, msg_type, page, now_};
     send(port, frame);
 }
 
 void Node::on_my_response(const Port &port, const Frame &f, const MyReq &mine)
 {
     my_reqs.erase(f.request_id);
-    if (mine.purpose == "assoc") {
-        logf("[link] node %s %s association",
+    if (mine.purpose == MyReq::ASSOC) {
+        logf(log, "[link] node %s %s association",
              mine.port.in ? "?" : protocol::serial10_str(mine.port.key).c_str(),
              f.success ? "accepted" : "refused");
         return;
     }
-    if (mine.purpose != "table" || !f.success || !links_table) return;
+    if (!f.success || !links_table) return;
     auto r = protocol::parse_link_entries_response(f.payload);
     if (!r) return;
     auto ps = peer_serial.find(port);
@@ -1237,9 +1217,7 @@ void Node::on_link_msg(const Port &port, const Frame &f, int64_t)
         if (e) {
             bool linked = mt == MSG_LINK_DEVICE;
             linked ? lt->link(*e) : lt->unlink(*e);
-            Bytes note = build_link_notification(linked, *e);
-            ids.seen(rid_of(note));
-            flood(note);
+            flood_own(build_link_notification(linked, *e));
         }
         send(port, build_response(mt, f.request_id, e.has_value(), Bytes()));
     } else if (mt == MSG_DEVICE_LINKED || mt == MSG_DEVICE_UNLINKED) {

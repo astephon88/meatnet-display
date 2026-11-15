@@ -11,7 +11,7 @@
 // the app unit by a configured address or the app unit's UDP beacon.
 //   both:  hello {role, serial, key, max_conn, mac}, ping {ts}, pong {ts}
 //   field: scan {d, r, n, m}          scan-table entries updated since last batch
-//          link {k, kind, state, desc, mtu, count, info, stats}
+//          link {k, kind, state, mtu, count, info, stats}
 //          rx   {k, sub, data}         a link notification
 //   app:   open {k, kind, at, addr}, close {k}, write {k, data},
 //          scan_active {on}, standby {on}
@@ -32,14 +32,15 @@
 #include <utility>
 #include <vector>
 
-#include "transport.h"
+#include "radio_source.h"
+#include "util.h"
 
 struct cJSON;
 
 namespace split {
 
 using protocol::Bytes;
-using LogFn = std::function<void(const std::string &)>;
+using core::LogFn;
 
 constexpr int VERSION = 1;
 constexpr int64_t PING_MS = 2000;
@@ -54,54 +55,14 @@ Bytes unb64(const std::string &text);       // "" on bad input
 // JSON object with a "t" field (caller deletes) or nullptr.
 std::string encode(cJSON *msg);
 cJSON *decode(const std::string &line);
-// The subscriptions a link of this kind delivers.
-const std::vector<std::string> &link_subs(const std::string &kind);
 
 // -- field side ---------------------------------------------------------------------------
-
-// One link as the field unit's radio reports it (state + notifications since
-// the last report), plus diagnostics the C++ radio keeps.
-struct LinkReport {
-    Bytes key;
-    std::string kind, state, desc;
-    int mtu = 23;
-    uint32_t count = 0;
-    std::map<std::string, std::string> info;
-    std::vector<std::pair<std::string, Bytes>> rx;     // (sub, data)
-    bool has_stats = false;
-    uint32_t connects = 0;
-    std::map<std::string, uint32_t> drops;              // by reason
-    std::string params, asked;
-};
-
-// The field unit's radio, as FieldRadio needs it. Must be safe to call from
-// the split client's thread.
-class FieldSource {
-public:
-    virtual ~FieldSource() = default;
-    struct Tables {
-        std::map<Bytes, core::Observation> direct, repeated, nodes, meaters;
-    };
-    virtual Tables tables() = 0;                        // a snapshot
-    virtual void prune(int64_t now, int64_t max_age_ms) = 0;
-    virtual std::vector<LinkReport> collect_links() = 0;   // drains notifications
-    virtual std::vector<Bytes> take_removed_links() = 0;
-    virtual void open_link(const Bytes &key, const std::string &kind, int addr_type,
-                           const Bytes &addr) = 0;
-    virtual void close_link(const Bytes &key) = 0;
-    virtual void write_link(const Bytes &key, const Bytes &data) = 0;
-    virtual void close_all_links() = 0;
-    virtual void set_scan_active(bool on) = 0;
-    virtual void set_standby(bool on) = 0;
-    // Never report the app unit's own advertisements back to it.
-    virtual void set_ignore(const Bytes &mac, const Bytes &serial10) = 0;
-};
 
 // Turns the field radio's tables and links into messages for the app unit,
 // and applies the app unit's commands.
 class FieldRadio {
 public:
-    FieldRadio(FieldSource &src, LogFn log = nullptr) : src_(src), log_(std::move(log)) {}
+    explicit FieldRadio(core::RadioSource &src) : src_(src) {}
     void reset();                               // new connection: resend everything
     void set_ignore(const Bytes &mac, const std::string &serial);
     void prune(int64_t now);
@@ -113,8 +74,7 @@ public:
     std::map<std::string, int> stats{{"scan", 0}, {"rx", 0}, {"cmd", 0}};
 
 private:
-    FieldSource &src_;
-    LogFn log_;
+    core::RadioSource &src_;
     Bytes ignore_serial_;
     std::map<std::string, int64_t> sent_;       // table letter + key -> sighting time sent
     std::map<Bytes, std::string> links_;        // key -> last reported signature
@@ -127,7 +87,6 @@ struct ClientConfig {
     std::string serial;         // our serial (10 chars)
     int max_conn = 4;           // outbound connections we offer
     Bytes mac;                  // our BLE address, display order
-    std::string impl;           // implementation tag in hello ("idf", ...); "" = none
 };
 
 class SplitClient {
@@ -146,7 +105,6 @@ public:
 
 private:
     bool find_app(std::string &host);
-    void logf(const char *fmt, ...);
 
     FieldRadio &fr_;
     ClientConfig cfg_;
@@ -168,17 +126,14 @@ public:
         : radio_(radio), key_(std::move(key)), kind_(std::move(kind)) {}
     const std::string &kind() const override { return kind_; }
     const std::string &state() const override { return state_; }
-    bool enabled() const override { return enabled_; }
     uint32_t count() const override { return count_; }
     int mtu() const override { return mtu_; }
     std::vector<Bytes> take(const std::string &sub) override;
     bool write(const Bytes &data) override;
     const std::map<std::string, std::string> &info() const override { return info_; }
     std::string stats() const override { return stats_; }
-    std::string describe() const { return desc_.empty() ? state_ : desc_; }
 
-    std::string state_ = "idle", desc_;
-    bool enabled_ = true;
+    std::string state_ = "idle";
     uint32_t count_ = 0;
     int mtu_ = 23;
     std::map<std::string, std::string> info_;
@@ -220,7 +175,6 @@ public:
     void on_disconnect();
     void apply(const std::string &line, int64_t now);
     void queue(cJSON *msg);                 // takes ownership; dropped while offline
-    std::vector<std::string> take_outbox();
 
     bool connected = false;                 // as the Node's thread last saw it
     std::string peer_serial, peer_ip;
@@ -231,8 +185,7 @@ public:
     void net_connected(const std::string &hello_line, const std::string &ip);
     void net_received(const std::string &line);
     void net_disconnected();
-    std::vector<std::string> net_take_outbox();
-    bool net_is_connected() const { return net_connected_; }
+    std::vector<std::string> take_outbox();
 
 private:
     void apply(cJSON *msg, int64_t now);
@@ -249,7 +202,6 @@ private:
     };
     std::vector<Event> inbox_;
     std::vector<std::string> outbox_;
-    std::atomic<bool> net_connected_{false};
 };
 
 struct ServerConfig {
@@ -268,11 +220,25 @@ public:
     void stop() { stop_ = true; }
 
 private:
-    void logf(const char *fmt, ...);
+    struct Candidate {
+        int fd;
+        std::string ip, buf;
+        int64_t deadline;
+        bool readable;
+    };
+    void poll_candidates(int64_t now);
+    void poll_session(bool readable, int64_t now);
+    void end_session();
+
     RemoteRadio &remote_;
     ServerConfig cfg_;
     LogFn log_;
     std::atomic<bool> stop_{false};
+    // run()'s thread only.
+    std::vector<Candidate> candidates_;
+    int sfd_ = -1;              // the field unit's session
+    std::string sbuf_;
+    int64_t rx_at_ = 0, ping_at_ = 0;
 };
 
 }  // namespace split

@@ -1,6 +1,5 @@
-// Field unit radio: NimBLE observer (scan tables) now; central links come in
-// milestone 3. Mirrors the scan side of the MicroPython ble.BleTransport, so
-// the WiFi session can report the same four tables to the app unit.
+// The unit's radio, scan side: a NimBLE observer filling the four scan
+// tables (links.h holds the outbound links).
 #pragma once
 
 #include <cstdint>
@@ -10,22 +9,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "transport.h"
+
 struct ble_gap_event;          // NimBLE types (host/ble_gap.h), global namespace
 struct ble_gap_disc_desc;
 
 namespace radio {
 
-struct Sighting {
-    std::string body;     // manufacturer data after the company ID (Combustion)
-    std::string name;     // MEATER: advertised name ("" if only the UUID matched)
-    int64_t ms = 0;       // when last heard (esp_timer milliseconds)
-    uint8_t addr_type = 0;
-    std::string addr;     // 6 bytes, display order
-    int8_t rssi = 0;
-};
-
 // Keys are raw bytes: probe serial (4), node serial (10), MEATER address (6).
-using Table = std::map<std::string, Sighting>;
+// Sightings are timed in esp_timer milliseconds (core::ticks_ms()'s clock).
+using Table = std::map<std::string, core::Observation>;
 
 class Radio {
 public:

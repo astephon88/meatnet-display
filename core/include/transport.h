@@ -1,7 +1,7 @@
 // What the Node needs from the radio side: the scan tables, the outbound
 // links, phone (inbound) connections and advertising. Implemented by the
 // ESP32 and Linux radios, by the app role's split transport, and by the
-// tests' fake (the Python units used the same shape as a duck type).
+// tests' fake.
 //
 // The Node is single-threaded: an implementation fills the tables and link
 // queues from its radio thread under its own lock, and hands them over
@@ -41,7 +41,6 @@ public:
     virtual const std::string &kind() const = 0;    // "probe", "node", "meater"
     virtual const std::string &state() const = 0;   // "idle", "connecting", ..., "ready", "error: ..."
     bool ready() const { return state() == "ready"; }
-    virtual bool enabled() const { return true; }
     virtual uint32_t count() const { return 0; }    // notifications received
     virtual int mtu() const { return 23; }
     // Connection diagnostics as JSON ({connects, drops, params, asked}), "" = none.

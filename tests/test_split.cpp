@@ -40,105 +40,6 @@ struct Msg {
     double num(const char *k) const { return cJSON_GetObjectItem(m, k)->valuedouble; }
 };
 
-// The field unit's radio, backed by fake links; locked, as the split client
-// reads it from its own thread.
-struct FakeFieldSource : split::FieldSource {
-    std::mutex mu;
-    Tables t;
-    std::map<Bytes, std::shared_ptr<FakeLink>> links;
-    std::vector<Bytes> removed;
-    bool scan_active = false, standby = false;
-    Bytes ignore_mac;
-
-    template <class F> void with(F fn)
-    {
-        std::lock_guard<std::mutex> g(mu);
-        fn();
-    }
-    Tables tables() override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        return t;
-    }
-    void prune(int64_t now, int64_t max_age) override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        for (auto *tb : {&t.direct, &t.repeated, &t.nodes, &t.meaters})
-            for (auto it = tb->begin(); it != tb->end();)
-                it = now - it->second.ticks > max_age ? tb->erase(it) : std::next(it);
-    }
-    std::vector<split::LinkReport> collect_links() override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        std::vector<split::LinkReport> out;
-        for (auto &kv : links) {
-            split::LinkReport r;
-            r.key = kv.first;
-            r.kind = kv.second->kind();
-            r.state = kv.second->state();
-            r.mtu = kv.second->mtu();
-            r.info = kv.second->info_;
-            if (kv.second->ready())
-                for (auto &sub : split::link_subs(r.kind))
-                    for (auto &d : kv.second->take(sub)) r.rx.push_back({sub, d});
-            out.push_back(r);
-        }
-        return out;
-    }
-    std::vector<Bytes> take_removed_links() override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        return std::move(removed);
-    }
-    void open_link(const Bytes &key, const std::string &kind, int, const Bytes &) override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        auto &l = links[key];
-        if (!l) l = std::make_shared<FakeLink>(kind);
-    }
-    void close_link(const Bytes &key) override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        if (links.erase(key)) removed.push_back(key);
-    }
-    void write_link(const Bytes &key, const Bytes &data) override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        auto it = links.find(key);
-        if (it != links.end() && it->second->ready()) it->second->write(data);
-    }
-    void close_all_links() override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        for (auto &kv : links) removed.push_back(kv.first);
-        links.clear();
-    }
-    void set_scan_active(bool on) override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        scan_active = on;
-    }
-    void set_standby(bool on) override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        standby = on;
-    }
-    // As the radios do: forget what was collected from the app unit.
-    void set_ignore(const Bytes &mac, const Bytes &serial10) override
-    {
-        std::lock_guard<std::mutex> g(mu);
-        ignore_mac = mac;
-        if (!mac.empty()) {
-            for (auto *tb : {&t.direct, &t.nodes})
-                for (auto it = tb->begin(); it != tb->end();)
-                    it = it->second.addr == mac ? tb->erase(it) : std::next(it);
-            t.meaters.erase(mac);
-            t.repeated.clear();     // can't tell whose: refills within seconds
-        }
-        if (!serial10.empty()) t.nodes.erase(serial10);
-    }
-};
-
 static core::Observation obs(const Bytes &body, int64_t ticks, int at, const Bytes &addr, int rssi)
 {
     core::Observation o;
@@ -176,7 +77,7 @@ TEST_CASE("encode/decode and base64")
 
 TEST_CASE("field radio: scan deltas and link messages")
 {
-    FakeFieldSource src;
+    FakeRadioSource src;
     split::FieldRadio fr(src);
     int64_t now = 1000000;
     Bytes body = probe_body(PROBE, std::vector<double>(8, 40));
@@ -230,11 +131,10 @@ TEST_CASE("remote radio mirrors the scan tables and proxies links")
     REQUIRE(out.size() == 1);
     CHECK(Msg(out[0]).str("t") == "open");
     CHECK_FALSE(link->write("x"));              // not ready yet
-    r.apply("{\"t\":\"link\",\"k\":\"" + hexs(PROBE) + "\",\"state\":\"ready\",\"desc\":\"ok\",\"mtu\":185}", 0);
+    r.apply("{\"t\":\"link\",\"k\":\"" + hexs(PROBE) + "\",\"state\":\"ready\",\"mtu\":185}", 0);
     r.apply("{\"t\":\"rx\",\"k\":\"" + hexs(PROBE) + "\",\"sub\":\"uart\",\"data\":\"" + split::b64("u") + "\"}", 0);
     CHECK(link->ready());
     CHECK(link->take("uart") == std::vector<Bytes>{"u"});
-    CHECK(static_cast<split::RemoteLink &>(*link).describe() == "ok");
     CHECK(link->mtu() == 185);
     CHECK(link->write("x"));
     out = r.take_outbox();
@@ -254,7 +154,7 @@ TEST_CASE("remote link keeps the field unit's stats")
     r.on_connect("{\"t\":\"hello\",\"max_conn\":6}", "");
     auto link = r.open_link(PROBE, "node", 0, Bytes(6, 1));
     r.apply("{\"t\":\"link\",\"k\":\"" + hexs(PROBE) +
-                "\",\"state\":\"ready\",\"desc\":\"\",\"mtu\":177,\"stats\":{\"connects\":3,"
+                "\",\"state\":\"ready\",\"mtu\":177,\"stats\":{\"connects\":3,"
                 "\"drops\":{\"supervision timeout (signal lost) (0x08)\":2},\"params\":\"50.0ms/0/8000ms\"}}",
             0);
     CHECK(static_cast<split::RemoteLink &>(*link).stats_ ==
@@ -264,7 +164,7 @@ TEST_CASE("remote link keeps the field unit's stats")
 
 TEST_CASE("the field unit ignores the app unit's own adverts")
 {
-    FakeFieldSource src;
+    FakeRadioSource src;
     split::FieldRadio fr(src);
     int64_t now = 1000000;
     Bytes app_mac;
@@ -354,7 +254,7 @@ TEST_CASE("end to end over TCP")
     split::SplitServer server(remote, scfg);
     std::thread srv([&] { server.run(); });
 
-    FakeFieldSource fsrc;
+    FakeRadioSource fsrc;
     split::FieldRadio fradio(fsrc);
     split::ClientConfig ccfg;
     ccfg.peer = "127.0.0.1";
@@ -481,7 +381,7 @@ TEST_CASE("a wrong key is rejected")
     });
     std::thread srv([&] { server.run(); });
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    FakeFieldSource fsrc;
+    FakeRadioSource fsrc;
     split::FieldRadio fr(fsrc);
     split::ClientConfig ccfg;
     ccfg.key = "wrong";

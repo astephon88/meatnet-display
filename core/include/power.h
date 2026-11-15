@@ -37,7 +37,7 @@ public:
     static constexpr int64_t BATTERY_EVERY_MS = 10000;
     static constexpr int64_t WAKE_FRESH_MS = 10000;
 
-    PowerManager(Settings &cfg, Transport &t, Node &node, Hooks hooks, std::function<void(const std::string &)> log,
+    PowerManager(Settings &cfg, Transport &t, Node &node, Hooks hooks, LogFn log,
                  int64_t now);
 
     Battery read_battery();
@@ -60,7 +60,7 @@ private:
     Transport &t_;
     Node &node_;
     Hooks hooks_;
-    std::function<void(const std::string &)> log_;
+    LogFn log_;
     std::optional<int64_t> bat_at_;
 };
 
